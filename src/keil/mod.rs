@@ -2,6 +2,14 @@ pub mod parser;
 pub mod editor;
 pub mod builder;
 
+pub use parser::{
+    parse_project, parse_workspace, load_project, load_workspace,
+    is_workspace_file, is_project_file,
+    KeilProject, KeilWorkspace, Target, DeviceInfo, OutputInfo,
+    CCompilerInfo, AssemblerInfo, LinkerInfo, MemoryInfo, MemoryRegion,
+    Group, FileEntry, WorkspaceProject,
+};
+
 use crate::output::{self, OutputFormat};
 
 use super::Cli;
