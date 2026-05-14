@@ -41,13 +41,13 @@ pub fn render(value: &OutputValue, format: OutputFormat) -> String {
 }
 
 /// Convenience: render and print to stdout.
-pub fn print(value: &OutputValue, format: OutputFormat) {
+pub fn display(value: &OutputValue, format: OutputFormat) {
     let text = render(value, format);
-    print!("{text}");
+    println!("{text}");
 }
 
 /// Print a "not implemented" message for the given command name.
 pub fn not_implemented(cmd: &str, format: OutputFormat) {
     let val = OutputValue::Message(format!("{cmd}: not implemented"));
-    print(&val, format);
+    display(&val, format);
 }

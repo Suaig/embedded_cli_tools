@@ -557,6 +557,10 @@ enum DebugCommands {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    if cli.ai && cli.json {
+        anyhow::bail!("--ai and --json are mutually exclusive");
+    }
+
     let format = if cli.ai {
         OutputFormat::Ai
     } else if cli.json {
