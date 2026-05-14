@@ -32,7 +32,7 @@ mod tests {
 
     #[test]
     fn test_decode_hex_empty() {
-        assert_eq!(decode_hex("").unwrap(), Vec::new());
+        assert_eq!(decode_hex("").unwrap(), Vec::<u8>::new());
     }
 
     #[test]
