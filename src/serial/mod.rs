@@ -48,6 +48,7 @@ pub fn handle(serial: &super::SerialCommands, format: OutputFormat) -> anyhow::R
             let ports = port::scan()?;
             let headers = vec![
                 "Port".into(),
+                "Type".into(),
                 "Manufacturer".into(),
                 "VID".into(),
                 "PID".into(),
@@ -58,6 +59,7 @@ pub fn handle(serial: &super::SerialCommands, format: OutputFormat) -> anyhow::R
                 .map(|p| {
                     vec![
                         p.name.clone(),
+                        p.port_type.clone(),
                         p.manufacturer.clone().unwrap_or_else(|| "-".into()),
                         p.vid.map(|v| format!("0x{:04X}", v)).unwrap_or_else(|| "-".into()),
                         p.pid.map(|v| format!("0x{:04X}", v)).unwrap_or_else(|| "-".into()),
