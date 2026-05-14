@@ -430,6 +430,48 @@ fn cmd_files(
     Ok(())
 }
 
+fn cmd_build(
+    path_str: &str,
+    target: &Option<String>,
+    command: builder::BuildCommand,
+    format: OutputFormat,
+) -> anyhow::Result<()> {
+    let path = PathBuf::from(path_str);
+
+    // For workspace files, resolve the sub-project first
+    let project_path = if is_workspace_file(&path) {
+        let (resolved, _) = resolve_project_path(path_str, &None)?;
+        resolved
+    } else if is_project_file(&path) {
+        path
+    } else {
+        anyhow::bail!(
+            "unsupported file type: {}. Expected .uvprojx or .uvmpw",
+            path.display()
+        );
+    };
+
+    let result = builder::build(&project_path, target, command)?;
+
+    let mut pairs = vec![
+        ("Success".into(), if result.success { "yes" } else { "no" }.into()),
+        ("Errors".into(), result.errors.to_string()),
+        ("Warnings".into(), result.warnings.to_string()),
+        ("Build Time".into(), result.build_time.clone()),
+        ("Output".into(), result.output_file.clone()),
+    ];
+
+    if let Some(ps) = &result.program_size {
+        pairs.push(("Code Size".into(), format!(
+            "Code={} RO-data={} RW-data={} ZI-data={}",
+            ps.code, ps.ro_data, ps.rw_data, ps.zi_data
+        )));
+    }
+
+    output::display(&OutputValue::KeyValue(pairs), format);
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
@@ -514,21 +556,17 @@ pub fn handle(_cli: &Cli, keil: &super::KeilCommands, format: OutputFormat) -> a
             output::display(&OutputValue::Message("ok".into()), format);
             Ok(())
         }
-        super::KeilCommands::Build { .. } => {
-            output::not_implemented("keil build", format);
-            Ok(())
+        super::KeilCommands::Build { path, target } => {
+            cmd_build(path, target, builder::BuildCommand::Build, format)
         }
-        super::KeilCommands::Rebuild { .. } => {
-            output::not_implemented("keil rebuild", format);
-            Ok(())
+        super::KeilCommands::Rebuild { path, target } => {
+            cmd_build(path, target, builder::BuildCommand::Rebuild, format)
         }
-        super::KeilCommands::Clean { .. } => {
-            output::not_implemented("keil clean", format);
-            Ok(())
+        super::KeilCommands::Clean { path, target } => {
+            cmd_build(path, target, builder::BuildCommand::Clean, format)
         }
-        super::KeilCommands::Flash { .. } => {
-            output::not_implemented("keil flash", format);
-            Ok(())
+        super::KeilCommands::Flash { path, target } => {
+            cmd_build(path, target, builder::BuildCommand::Flash, format)
         }
     }
 }
