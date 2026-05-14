@@ -442,30 +442,35 @@ pub fn handle(_cli: &Cli, keil: &super::KeilCommands, format: OutputFormat) -> a
         super::KeilCommands::Config { path, target, category } => {
             cmd_config(path, target, category, format)
         }
-        super::KeilCommands::ConfigSet { .. } => {
-            output::not_implemented("keil config set", format);
+        super::KeilCommands::ConfigSet { path, target, key, value } => {
+            editor::config_set(std::path::Path::new(path), target, key, value)?;
+            output::display(&OutputValue::Message("ok".into()), format);
             Ok(())
         }
         super::KeilCommands::Defines { path, target } => {
             cmd_defines(path, target, format)
         }
-        super::KeilCommands::DefinesAdd { .. } => {
-            output::not_implemented("keil defines add", format);
+        super::KeilCommands::DefinesAdd { path, target, macro_name } => {
+            editor::defines_add(std::path::Path::new(path), target, macro_name)?;
+            output::display(&OutputValue::Message("ok".into()), format);
             Ok(())
         }
-        super::KeilCommands::DefinesRemove { .. } => {
-            output::not_implemented("keil defines remove", format);
+        super::KeilCommands::DefinesRemove { path, target, macro_name } => {
+            editor::defines_remove(std::path::Path::new(path), target, macro_name)?;
+            output::display(&OutputValue::Message("ok".into()), format);
             Ok(())
         }
         super::KeilCommands::Includes { path, target } => {
             cmd_includes(path, target, format)
         }
-        super::KeilCommands::IncludesAdd { .. } => {
-            output::not_implemented("keil includes add", format);
+        super::KeilCommands::IncludesAdd { path, target, path_to_add } => {
+            editor::includes_add(std::path::Path::new(path), target, path_to_add)?;
+            output::display(&OutputValue::Message("ok".into()), format);
             Ok(())
         }
-        super::KeilCommands::IncludesRemove { .. } => {
-            output::not_implemented("keil includes remove", format);
+        super::KeilCommands::IncludesRemove { path, target, path_to_remove } => {
+            editor::includes_remove(std::path::Path::new(path), target, path_to_remove)?;
+            output::display(&OutputValue::Message("ok".into()), format);
             Ok(())
         }
         super::KeilCommands::Groups { path, target } => {
@@ -474,32 +479,39 @@ pub fn handle(_cli: &Cli, keil: &super::KeilCommands, format: OutputFormat) -> a
         super::KeilCommands::Files { path, target, group } => {
             cmd_files(path, target, group, format)
         }
-        super::KeilCommands::GroupAdd { .. } => {
-            output::not_implemented("keil group add", format);
+        super::KeilCommands::GroupAdd { path, target, name } => {
+            editor::group_add(std::path::Path::new(path), target, name)?;
+            output::display(&OutputValue::Message("ok".into()), format);
             Ok(())
         }
-        super::KeilCommands::GroupRemove { .. } => {
-            output::not_implemented("keil group remove", format);
+        super::KeilCommands::GroupRemove { path, target, name } => {
+            editor::group_remove(std::path::Path::new(path), target, name)?;
+            output::display(&OutputValue::Message("ok".into()), format);
             Ok(())
         }
-        super::KeilCommands::GroupRename { .. } => {
-            output::not_implemented("keil group rename", format);
+        super::KeilCommands::GroupRename { path, target, old, new } => {
+            editor::group_rename(std::path::Path::new(path), target, old, new)?;
+            output::display(&OutputValue::Message("ok".into()), format);
             Ok(())
         }
-        super::KeilCommands::FileAdd { .. } => {
-            output::not_implemented("keil file add", format);
+        super::KeilCommands::FileAdd { path, target, group, filepath } => {
+            editor::file_add(std::path::Path::new(path), target, group, filepath)?;
+            output::display(&OutputValue::Message("ok".into()), format);
             Ok(())
         }
-        super::KeilCommands::FileRemove { .. } => {
-            output::not_implemented("keil file remove", format);
+        super::KeilCommands::FileRemove { path, target, group, filename } => {
+            editor::file_remove(std::path::Path::new(path), target, group, filename)?;
+            output::display(&OutputValue::Message("ok".into()), format);
             Ok(())
         }
-        super::KeilCommands::FileExclude { .. } => {
-            output::not_implemented("keil file exclude", format);
+        super::KeilCommands::FileExclude { path, target, group, filename } => {
+            editor::file_exclude(std::path::Path::new(path), target, group, filename)?;
+            output::display(&OutputValue::Message("ok".into()), format);
             Ok(())
         }
-        super::KeilCommands::FileInclude { .. } => {
-            output::not_implemented("keil file include", format);
+        super::KeilCommands::FileInclude { path, target, group, filename } => {
+            editor::file_include(std::path::Path::new(path), target, group, filename)?;
+            output::display(&OutputValue::Message("ok".into()), format);
             Ok(())
         }
         super::KeilCommands::Build { .. } => {
