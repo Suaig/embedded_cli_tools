@@ -4,26 +4,15 @@ pub mod generator;
 
 use crate::output::{self, OutputValue, OutputFormat};
 use parser::load_ioc;
+use std::path::Path;
 
 pub fn handle(ioc: &super::IocCommands, format: OutputFormat) -> anyhow::Result<()> {
     match ioc {
         super::IocCommands::Info { path } => cmd_info(path, format),
         super::IocCommands::Get { path, prefix } => cmd_get(path, prefix, format),
-        super::IocCommands::Set { path, key, value } => {
-            let _ = (path, key, value);
-            output::not_implemented("ioc set", format);
-            Ok(())
-        }
-        super::IocCommands::Rm { path, key } => {
-            let _ = (path, key);
-            output::not_implemented("ioc rm", format);
-            Ok(())
-        }
-        super::IocCommands::Generate { path, cubemx } => {
-            let _ = (path, cubemx);
-            output::not_implemented("ioc generate", format);
-            Ok(())
-        }
+        super::IocCommands::Set { path, key, value } => cmd_set(path, key, value, format),
+        super::IocCommands::Rm { path, key } => cmd_rm(path, key, format),
+        super::IocCommands::Generate { path, cubemx } => cmd_generate(path, cubemx, format),
     }
 }
 
@@ -55,7 +44,7 @@ fn cmd_info(path: &str, format: OutputFormat) -> anyhow::Result<()> {
 }
 
 fn cmd_get(path: &str, prefix: &str, format: OutputFormat) -> anyhow::Result<()> {
-    let ioc = load_ioc(std::path::Path::new(path))?;
+    let ioc = load_ioc(Path::new(path))?;
 
     // Exact match takes priority
     if let Some(val) = ioc.get(prefix) {
@@ -75,6 +64,28 @@ fn cmd_get(path: &str, prefix: &str, format: OutputFormat) -> anyhow::Result<()>
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
     let value = OutputValue::KeyValue(pairs);
+    output::display(&value, format);
+    Ok(())
+}
+
+fn cmd_set(path: &str, key: &str, value: &str, format: OutputFormat) -> anyhow::Result<()> {
+    editor::set(Path::new(path), key, value)?;
+    let value = OutputValue::Message("ok".to_string());
+    output::display(&value, format);
+    Ok(())
+}
+
+fn cmd_rm(path: &str, key: &str, format: OutputFormat) -> anyhow::Result<()> {
+    editor::remove(Path::new(path), key)?;
+    let value = OutputValue::Message("ok".to_string());
+    output::display(&value, format);
+    Ok(())
+}
+
+fn cmd_generate(path: &str, cubemx: &Option<String>, format: OutputFormat) -> anyhow::Result<()> {
+    let cubemx_path = cubemx.as_deref().map(Path::new);
+    generator::generate(Path::new(path), cubemx_path)?;
+    let value = OutputValue::Message("ok".to_string());
     output::display(&value, format);
     Ok(())
 }
