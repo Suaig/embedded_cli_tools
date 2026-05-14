@@ -109,13 +109,13 @@ pub fn handle(serial: &super::SerialCommands, format: OutputFormat) -> anyhow::R
             output::display(&OutputValue::Message(text), format);
         }
         super::SerialCommands::Daemon { command } => {
-            handle_daemon(command, format);
+            handle_daemon(command, format)?;
         }
     }
     Ok(())
 }
 
-fn handle_daemon(daemon: &super::DaemonCommands, format: OutputFormat) {
+fn handle_daemon(daemon: &super::DaemonCommands, format: OutputFormat) -> anyhow::Result<()> {
     match daemon {
         super::DaemonCommands::Start {
             port,
@@ -125,28 +125,66 @@ fn handle_daemon(daemon: &super::DaemonCommands, format: OutputFormat) {
             parity,
             stop_bits,
         } => {
-            let _ = (port, baud, id, data_bits, parity, stop_bits);
-            output::not_implemented("serial daemon start", format);
+            let config = build_config(*baud, data_bits, parity, stop_bits);
+            let daemon_id = daemon::start(port, *baud, id.as_deref(), &config)?;
+            output::display(&OutputValue::Message(daemon_id), format);
         }
         super::DaemonCommands::List => {
-            output::not_implemented("serial daemon list", format);
+            let daemons = daemon::list()?;
+            if daemons.is_empty() {
+                output::display(&OutputValue::Message("No daemons found".into()), format);
+            } else {
+                let headers = vec![
+                    "ID".into(),
+                    "Port".into(),
+                    "Baud".into(),
+                    "PID".into(),
+                    "Status".into(),
+                    "Started".into(),
+                ];
+                let rows: Vec<Vec<String>> = daemons
+                    .iter()
+                    .map(|d| {
+                        vec![
+                            d.id.clone(),
+                            d.port_name.clone(),
+                            d.baud_rate.to_string(),
+                            d.pid.to_string(),
+                            d.status.clone(),
+                            d.started_at.clone(),
+                        ]
+                    })
+                    .collect();
+                output::display(&OutputValue::Table { headers, rows }, format);
+            }
         }
         super::DaemonCommands::Send { id, data, hex } => {
-            let _ = (id, data, hex);
-            output::not_implemented("serial daemon send", format);
+            let bytes = if *hex {
+                protocol::decode_hex(data)?
+            } else {
+                data.as_bytes().to_vec()
+            };
+            daemon::send(id, &bytes)?;
+            output::display(&OutputValue::Message("ok".into()), format);
         }
         super::DaemonCommands::Read {
             id,
-            timeout,
+            timeout: _,
             hex,
             clear,
         } => {
-            let _ = (id, timeout, hex, clear);
-            output::not_implemented("serial daemon read", format);
+            let received = daemon::read(id, *clear)?;
+            let text = if *hex {
+                protocol::encode_hex(&received)
+            } else {
+                String::from_utf8_lossy(&received).into_owned()
+            };
+            output::display(&OutputValue::Message(text), format);
         }
         super::DaemonCommands::Stop { id } => {
-            let _ = id;
-            output::not_implemented("serial daemon stop", format);
+            daemon::stop(id)?;
+            output::display(&OutputValue::Message("ok".into()), format);
         }
     }
+    Ok(())
 }

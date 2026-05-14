@@ -19,8 +19,32 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
+    /// Internal: run as serial daemon process (hidden)
+    #[arg(long, hide = true)]
+    internal_daemon: Option<String>,
+
+    /// Internal: serial port for daemon mode (hidden)
+    #[arg(long, hide = true)]
+    port: Option<String>,
+
+    /// Internal: baud rate for daemon mode (hidden)
+    #[arg(long, hide = true)]
+    baud: Option<u32>,
+
+    /// Internal: data bits for daemon mode (hidden)
+    #[arg(long, hide = true)]
+    data_bits: Option<String>,
+
+    /// Internal: parity for daemon mode (hidden)
+    #[arg(long, hide = true)]
+    parity: Option<String>,
+
+    /// Internal: stop bits for daemon mode (hidden)
+    #[arg(long, hide = true)]
+    stop_bits: Option<String>,
+
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -557,6 +581,31 @@ enum DebugCommands {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    // Internal daemon mode: spawned as a background child process
+    if let Some(daemon_id) = &cli.internal_daemon {
+        let port_name = cli.port.as_deref().unwrap_or("COM1");
+        let baud_rate = cli.baud.unwrap_or(115200);
+        let db: u8 = cli.data_bits.as_deref().unwrap_or("8").parse().unwrap_or(8);
+        let sb: u8 = cli.stop_bits.as_deref().unwrap_or("1").parse().unwrap_or(1);
+        let parity = match cli.parity.as_deref().unwrap_or("none") {
+            "odd" => serialport::Parity::Odd,
+            "even" => serialport::Parity::Even,
+            _ => serialport::Parity::None,
+        };
+        let data_bits = match db {
+            5 => serialport::DataBits::Five,
+            6 => serialport::DataBits::Six,
+            7 => serialport::DataBits::Seven,
+            _ => serialport::DataBits::Eight,
+        };
+        let stop_bits = match sb {
+            2 => serialport::StopBits::Two,
+            _ => serialport::StopBits::One,
+        };
+        let config = serial::port::SerialConfig::new(baud_rate, data_bits, parity, stop_bits);
+        return serial::daemon::serve(daemon_id, port_name, baud_rate, &config);
+    }
+
     if cli.ai && cli.json {
         anyhow::bail!("--ai and --json are mutually exclusive");
     }
@@ -570,9 +619,13 @@ fn main() -> anyhow::Result<()> {
     };
 
     match &cli.command {
-        Commands::Keil { command } => keil::handle(&cli, command, format),
-        Commands::Ioc { command } => ioc::handle(command, format),
-        Commands::Serial { command } => serial::handle(command, format),
-        Commands::Debug { command } => debug::handle(command, format),
+        Some(Commands::Keil { command }) => keil::handle(&cli, command, format),
+        Some(Commands::Ioc { command }) => ioc::handle(command, format),
+        Some(Commands::Serial { command }) => serial::handle(command, format),
+        Some(Commands::Debug { command }) => debug::handle(command, format),
+        None => {
+            // No subcommand and no internal flag - shouldn't happen due to clap
+            anyhow::bail!("no command specified");
+        }
     }
 }
