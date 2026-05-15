@@ -48,22 +48,14 @@ pub fn handle(serial: &super::SerialCommands, format: OutputFormat) -> anyhow::R
             let ports = port::scan()?;
             let headers = vec![
                 "Port".into(),
-                "Type".into(),
-                "Manufacturer".into(),
-                "VID".into(),
-                "PID".into(),
-                "Serial".into(),
+                "Name".into(),
             ];
             let rows: Vec<Vec<String>> = ports
                 .iter()
                 .map(|p| {
                     vec![
                         p.name.clone(),
-                        p.port_type.clone(),
                         p.manufacturer.clone().unwrap_or_else(|| "-".into()),
-                        p.vid.map(|v| format!("0x{:04X}", v)).unwrap_or_else(|| "-".into()),
-                        p.pid.map(|v| format!("0x{:04X}", v)).unwrap_or_else(|| "-".into()),
-                        p.serial_number.clone().unwrap_or_else(|| "-".into()),
                     ]
                 })
                 .collect();
@@ -171,17 +163,58 @@ fn handle_daemon(daemon: &super::DaemonCommands, format: OutputFormat) -> anyhow
         }
         super::DaemonCommands::Read {
             id,
-            timeout: _,
             hex,
+        } => {
+            let received = daemon::read(id)?;
+            if received.is_empty() {
+                output::display(&OutputValue::Message("(no new data)".into()), format);
+            } else {
+                let text = if *hex {
+                    protocol::encode_hex(&received)
+                } else {
+                    String::from_utf8_lossy(&received).into_owned()
+                };
+                output::display(&OutputValue::Message(text), format);
+            }
+        }
+        super::DaemonCommands::History {
+            id,
+            limit,
             clear,
         } => {
-            let received = daemon::read(id, *clear)?;
-            let text = if *hex {
-                protocol::encode_hex(&received)
+            if *clear {
+                daemon::history_clear(id)?;
+                output::display(&OutputValue::Message("ok".into()), format);
             } else {
-                String::from_utf8_lossy(&received).into_owned()
-            };
-            output::display(&OutputValue::Message(text), format);
+                let entries = daemon::history(id, *limit)?;
+                if entries.is_empty() {
+                    output::display(&OutputValue::Message("(no history)".into()), format);
+                } else {
+                    let headers = vec![
+                        "Time".into(),
+                        "Dir".into(),
+                        "Bytes".into(),
+                        "Data (hex)".into(),
+                    ];
+                    let rows: Vec<Vec<String>> = entries
+                        .iter()
+                        .map(|e| {
+                            let data_display = if e.truncated {
+                                format!("{}...(truncated)", e.hex)
+                            } else {
+                                e.hex.clone()
+                            };
+                            vec![
+                                e.ts.clone(),
+                                e.dir.clone(),
+                                e.len.to_string(),
+                                data_display,
+                            ]
+                        })
+                        .collect();
+                    output::display(&OutputValue::Table { headers, rows }, format);
+                }
+            }
         }
         super::DaemonCommands::Stop { id } => {
             daemon::stop(id)?;

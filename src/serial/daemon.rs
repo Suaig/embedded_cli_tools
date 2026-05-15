@@ -13,6 +13,25 @@ use serde::{Deserialize, Serialize};
 use super::port::SerialConfig;
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Max history file size before pruning (5 MB).
+const HISTORY_MAX_SIZE: u64 = 5 * 1024 * 1024;
+
+/// When history exceeds the limit, prune to this ratio (keep last 50%).
+const HISTORY_KEEP_RATIO: f64 = 0.5;
+
+/// Max entries displayed by default for `history` command.
+const HISTORY_DEFAULT_LIMIT: usize = 100;
+
+/// Max entries displayable (hard cap).
+const HISTORY_MAX_LIMIT: usize = 1000;
+
+/// Max hex data length stored per history entry (bytes).
+const HISTORY_ENTRY_MAX_DATA: usize = 256;
+
+// ---------------------------------------------------------------------------
 // Metadata types
 // ---------------------------------------------------------------------------
 
@@ -27,6 +46,21 @@ pub struct DaemonMeta {
     pub pid: u32,
     pub started_at: String,
     pub status: String,
+}
+
+/// A single history entry for send/receive events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryEntry {
+    /// ISO 8601 timestamp.
+    pub ts: String,
+    /// "recv" or "send".
+    pub dir: String,
+    /// Total data length in bytes.
+    pub len: usize,
+    /// Hex-encoded data (may be truncated for large payloads).
+    pub hex: String,
+    /// Whether the hex data was truncated.
+    pub truncated: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -61,6 +95,11 @@ fn send_data_path(id: &str) -> PathBuf {
 /// Path to the shutdown signal file.
 fn shutdown_path(id: &str) -> PathBuf {
     state_dir(id).join("shutdown")
+}
+
+/// Path to the send/receive history file (JSONL format).
+fn history_path(id: &str) -> PathBuf {
+    state_dir(id).join("history.jsonl")
 }
 
 // ---------------------------------------------------------------------------
@@ -218,8 +257,9 @@ pub fn send(id: &str, data: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Read buffered data from a daemon.
-pub fn read(id: &str, clear: bool) -> anyhow::Result<Vec<u8>> {
+/// Read unread data from a daemon. After reading, the buffer is cleared
+/// so subsequent reads only return new data.
+pub fn read(id: &str) -> anyhow::Result<Vec<u8>> {
     let buf_path = buffer_path(id);
     if !buf_path.exists() {
         return Ok(Vec::new());
@@ -227,12 +267,41 @@ pub fn read(id: &str, clear: bool) -> anyhow::Result<Vec<u8>> {
 
     let data = fs::read(&buf_path)?;
 
-    if clear && !data.is_empty() {
-        // Truncate the buffer file
+    // Clear the buffer so next read only gets new data
+    if !data.is_empty() {
         fs::write(&buf_path, &[])?;
     }
 
     Ok(data)
+}
+
+/// List history entries for a daemon.
+pub fn history(id: &str, limit: Option<usize>) -> anyhow::Result<Vec<HistoryEntry>> {
+    let hist_path = history_path(id);
+    if !hist_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let max = limit.unwrap_or(HISTORY_DEFAULT_LIMIT).min(HISTORY_MAX_LIMIT);
+    let content = fs::read_to_string(&hist_path)?;
+
+    let entries: Vec<HistoryEntry> = content
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+
+    // Return the last `max` entries
+    let start = entries.len().saturating_sub(max);
+    Ok(entries[start..].to_vec())
+}
+
+/// Clear the history file for a daemon.
+pub fn history_clear(id: &str) -> anyhow::Result<()> {
+    let hist_path = history_path(id);
+    if hist_path.exists() {
+        fs::write(&hist_path, &[])?;
+    }
+    Ok(())
 }
 
 /// Stop a running daemon.
@@ -287,6 +356,7 @@ pub fn serve(
     let buf_path = buffer_path(id);
     let send_path = send_data_path(id);
     let shutdown_file = shutdown_path(id);
+    let hist_path = history_path(id);
 
     // Open serial port
     let mut port = serialport::new(port_name, baud_rate)
@@ -323,13 +393,16 @@ pub fn serve(
         if send_path.exists() {
             match fs::read(&send_path) {
                 Ok(data) if !data.is_empty() => {
+                    let send_len = data.len();
                     if let Err(_e) = port.write_all(&data) {
                         // Write failed; port might be disconnected
                     } else {
                         let _ = port.flush();
+                        append_history(&hist_path, "send", &data);
                     }
                     // Delete the send file regardless
                     let _ = fs::remove_file(&send_path);
+                    let _ = send_len; // suppress unused warning
                 }
                 Ok(_) => {
                     // Empty file, remove it
@@ -347,8 +420,10 @@ pub fn serve(
                 if let Err(_e) = buffer_file.write_all(&read_buf[..n]) {
                     break;
                 }
-                // Flush periodically (not every byte for performance)
                 let _ = buffer_file.flush();
+                append_history(&hist_path, "recv", &read_buf[..n]);
+                // Prune history if it exceeds the size limit
+                let _ = prune_history_if_needed(&hist_path);
             }
             Ok(_) => {
                 // 0 bytes, should not happen with timeout
@@ -463,6 +538,54 @@ fn chrono_now() -> String {
         Ok(out) => String::from_utf8_lossy(&out.stdout).trim().to_string(),
         Err(_) => "unknown".to_string(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// History helpers
+// ---------------------------------------------------------------------------
+
+/// Append a history entry to the JSONL file.
+fn append_history(path: &PathBuf, dir: &str, data: &[u8]) {
+    let truncated = data.len() > HISTORY_ENTRY_MAX_DATA;
+    let hex_data = if truncated {
+        super::protocol::encode_hex(&data[..HISTORY_ENTRY_MAX_DATA])
+    } else {
+        super::protocol::encode_hex(data)
+    };
+
+    let entry = HistoryEntry {
+        ts: chrono_now(),
+        dir: dir.to_string(),
+        len: data.len(),
+        hex: hex_data,
+        truncated,
+    };
+
+    if let Ok(line) = serde_json::to_string(&entry) {
+        // Open in append mode
+        if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(f, "{}", line);
+        }
+    }
+}
+
+/// Prune history file if it exceeds the size limit.
+/// Keeps the last ~50% of entries.
+fn prune_history_if_needed(path: &PathBuf) -> anyhow::Result<()> {
+    let meta = fs::metadata(path)?;
+    if meta.len() <= HISTORY_MAX_SIZE {
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(path)?;
+    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+
+    let keep_count = ((lines.len() as f64) * HISTORY_KEEP_RATIO) as usize;
+    let start = lines.len().saturating_sub(keep_count);
+    let kept: String = lines[start..].join("\n");
+
+    fs::write(path, kept)?;
+    Ok(())
 }
 
 /// Set up a Ctrl+C handler that sets a flag.
