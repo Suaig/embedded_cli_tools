@@ -126,9 +126,7 @@ pub fn find_uv4() -> anyhow::Result<PathBuf> {
 }
 
 /// Prefer UV4.com (console output) when available; fall back to UV4.exe.
-fn resolve_uv4_binary() -> anyhow::Result<PathBuf> {
-    let uv4 = find_uv4()?;
-    // Check if .com variant exists next to .exe
+fn prefer_com(uv4: &Path) -> anyhow::Result<PathBuf> {
     if let Some(stem) = uv4.file_stem() {
         let com_name = format!("{}.com", stem.to_string_lossy());
         if let Some(parent) = uv4.parent() {
@@ -138,7 +136,12 @@ fn resolve_uv4_binary() -> anyhow::Result<PathBuf> {
             }
         }
     }
-    Ok(uv4)
+    Ok(uv4.to_path_buf())
+}
+
+fn resolve_uv4_binary() -> anyhow::Result<PathBuf> {
+    let uv4 = find_uv4()?;
+    prefer_com(&uv4)
 }
 
 // ---------------------------------------------------------------------------
@@ -238,9 +241,12 @@ pub fn build(
     path: &Path,
     target: &Option<String>,
     command: BuildCommand,
+    uv4_path: Option<PathBuf>,
 ) -> anyhow::Result<BuildResult> {
-    let uv4 = resolve_uv4_binary()
-        .context("failed to locate UV4.exe")?;
+    let uv4 = match uv4_path {
+        Some(p) => prefer_com(&p).context("failed to locate UV4.exe")?,
+        None => resolve_uv4_binary().context("failed to locate UV4.exe")?,
+    };
 
     if !path.is_file() {
         anyhow::bail!("project file not found: {}", path.display());

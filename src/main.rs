@@ -2,6 +2,7 @@ mod keil;
 mod ioc;
 mod serial;
 mod debug;
+mod config;
 mod output;
 
 use clap::{Parser, Subcommand};
@@ -68,6 +69,11 @@ enum Commands {
     Debug {
         #[command(subcommand)]
         command: DebugCommands,
+    },
+    /// Configuration management
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
     },
 }
 
@@ -441,17 +447,22 @@ enum DaemonCommands {
         #[arg(long)]
         hex: bool,
     },
-    /// Read data from a daemon
+    /// Read unread data from a daemon
     Read {
         /// Daemon instance ID
         id: String,
-        /// Timeout in milliseconds
-        #[arg(short, long)]
-        timeout: Option<u64>,
         /// Display as hex
         #[arg(long)]
         hex: bool,
-        /// Clear buffer after reading
+    },
+    /// View send/receive history
+    History {
+        /// Daemon instance ID
+        id: String,
+        /// Max entries to display (default 100, max 1000)
+        #[arg(short, long)]
+        limit: Option<usize>,
+        /// Clear history
         #[arg(long)]
         clear: bool,
     },
@@ -575,6 +586,34 @@ enum DebugCommands {
 }
 
 // ---------------------------------------------------------------------------
+// Config subcommands
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand)]
+enum ConfigCommands {
+    /// Set a config value
+    Set {
+        /// Config key (keil_path, cubemx_path)
+        key: String,
+        /// Config value
+        value: String,
+        /// Save to user home (global) instead of cwd
+        #[arg(long)]
+        global: bool,
+    },
+    /// Remove a config value
+    Unset {
+        /// Config key
+        key: String,
+        /// Remove from user home (global) config
+        #[arg(long)]
+        global: bool,
+    },
+    /// List current config
+    List,
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -619,13 +658,47 @@ fn main() -> anyhow::Result<()> {
     };
 
     match &cli.command {
-        Some(Commands::Keil { command }) => keil::handle(&cli, command, format),
-        Some(Commands::Ioc { command }) => ioc::handle(command, format),
+        Some(Commands::Keil { command }) => {
+            let cfg = config::load();
+            keil::handle(&cli, command, &cfg, format)
+        }
+        Some(Commands::Ioc { command }) => {
+            let cfg = config::load();
+            ioc::handle(command, &cfg, format)
+        }
         Some(Commands::Serial { command }) => serial::handle(command, format),
         Some(Commands::Debug { command }) => debug::handle(command, format),
+        Some(Commands::Config { command }) => handle_config(command, format),
         None => {
-            // No subcommand and no internal flag - shouldn't happen due to clap
             anyhow::bail!("no command specified");
         }
     }
+}
+
+fn handle_config(cmd: &ConfigCommands, format: OutputFormat) -> anyhow::Result<()> {
+    match cmd {
+        ConfigCommands::Set { key, value, global } => {
+            let path = config::set(key, value, *global)?;
+            output::display(
+                &output::OutputValue::Message(format!("saved to {}", path.display())),
+                format,
+            );
+        }
+        ConfigCommands::Unset { key, global } => {
+            let path = config::unset(key, *global)?;
+            output::display(
+                &output::OutputValue::Message(format!("removed from {}", path.display())),
+                format,
+            );
+        }
+        ConfigCommands::List => {
+            let cfg = config::load();
+            let pairs = vec![
+                ("keil_path".into(), cfg.keil_path.unwrap_or_else(|| "-".into())),
+                ("cubemx_path".into(), cfg.cubemx_path.unwrap_or_else(|| "-".into())),
+            ];
+            output::display(&output::OutputValue::KeyValue(pairs), format);
+        }
+    }
+    Ok(())
 }

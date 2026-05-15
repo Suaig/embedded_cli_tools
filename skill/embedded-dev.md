@@ -118,9 +118,43 @@ emb ioc rm <path> PA5.Locked
 ### 生成代码
 
 ```bash
-# 调用 STM32CubeMX 生成代码
+# 调用 STM32CubeMX 生成代码（自动检测或使用配置的路径）
+emb ioc generate <path>
+
+# 指定 CubeMX 路径（优先级最高）
 emb ioc generate <path> --cubemx "C:/ST/STM32CubeMX/STM32CubeMX.exe"
 ```
+
+---
+
+## 配置管理
+
+`emb` 使用 `.embconfig.toml` 配置文件管理工具路径。配置文件按优先级加载：
+1. 用户目录 `~/.embconfig.toml`（优先级高）
+2. 当前工作目录 `.embconfig.toml`（优先级低）
+
+```bash
+# 查看当前配置
+emb config list
+
+# 设置 Keil UV4 路径（保存到用户目录，全局生效）
+emb config set keil_path "C:\Keil_v5\UV4\UV4.exe" --global
+
+# 设置 STM32CubeMX 路径
+emb config set cubemx_path "C:\ST\STM32CubeMX\STM32CubeMX.exe" --global
+
+# 保存到当前目录（仅当前项目生效）
+emb config set keil_path "C:\Keil_v5\UV4\UV4.exe"
+
+# 移除配置项
+emb config unset keil_path --global
+```
+
+配置项说明：
+- `keil_path`：UV4.exe 的完整路径，用于 build/rebuild/clean/flash 命令
+- `cubemx_path`：STM32CubeMX.exe 的完整路径，用于 ioc generate 命令
+
+如果未配置，工具会自动检测：先检查环境变量（`UV4_PATH`/`KEIL_PATH`/`CUBEMX_PATH`），再搜索常见安装路径。
 
 ---
 
@@ -155,11 +189,16 @@ emb serial daemon list
 
 # 通过守护进程发送数据
 emb serial daemon send <id> "AT\r\n"
-emb serial daemon send <id> "AT" --hex
+emb serial daemon send <id> "41540D0A" --hex
 
-# 读取守护进程缓冲区数据
+# 读取未读数据（读取后自动清空，下次只返回新数据）
 emb serial daemon read <id>
-emb serial daemon read <id> --timeout 2000 --hex --clear
+emb serial daemon read <id> --hex
+
+# 查看收发历史（带时间戳，默认最近 100 条）
+emb serial daemon history <id>
+emb serial daemon history <id> --limit 50
+emb serial daemon history <id> --clear
 
 # 停止守护进程
 emb serial daemon stop <id>

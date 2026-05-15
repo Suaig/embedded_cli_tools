@@ -133,28 +133,58 @@ fn set_element_text(elem: &mut Element, text: &str) {
 /// Returns (xml_path_segments, is_bool_field).
 fn resolve_config_path(key: &str) -> Option<(Vec<&'static str>, bool)> {
     match key {
-        // ccompiler
-        "ccompiler.optim"     => Some((vec!["TargetOption", "TargetArmAds", "Cads", "Optim"], false)),
-        "ccompiler.c99"       => Some((vec!["TargetOption", "TargetArmAds", "Cads", "uC99"], true)),
-        "ccompiler.gnu"       => Some((vec!["TargetOption", "TargetArmAds", "Cads", "uGnu"], true)),
-        "ccompiler.wlevel"    => Some((vec!["TargetOption", "TargetArmAds", "Cads", "wLevel"], false)),
-        "ccompiler.misc"      => Some((vec!["TargetOption", "TargetArmAds", "Cads", "VariousControls", "MiscControls"], false)),
+        // ccompiler - Target level (AC5/AC6 selection)
+        "ccompiler.ac6"           => Some((vec!["uAC6"], true)),
+        "ccompiler.pcc"           => Some((vec!["pCCUsed"], false)),
+        // ccompiler - C ads
+        "ccompiler.optim"         => Some((vec!["TargetOption", "TargetArmAds", "Cads", "Optim"], false)),
+        "ccompiler.otime"         => Some((vec!["TargetOption", "TargetArmAds", "Cads", "oTime"], true)),
+        "ccompiler.c99"           => Some((vec!["TargetOption", "TargetArmAds", "Cads", "uC99"], true)),
+        "ccompiler.gnu"           => Some((vec!["TargetOption", "TargetArmAds", "Cads", "uGnu"], true)),
+        "ccompiler.wlevel"        => Some((vec!["TargetOption", "TargetArmAds", "Cads", "wLevel"], false)),
+        "ccompiler.strict"        => Some((vec!["TargetOption", "TargetArmAds", "Cads", "Strict"], true)),
+        "ccompiler.one_elf"       => Some((vec!["TargetOption", "TargetArmAds", "Cads", "OneElfS"], true)),
+        "ccompiler.ropi"          => Some((vec!["TargetOption", "TargetArmAds", "Cads", "Ropi"], true)),
+        "ccompiler.rwpi"          => Some((vec!["TargetOption", "TargetArmAds", "Cads", "Rwpi"], true)),
+        "ccompiler.v6lang"        => Some((vec!["TargetOption", "TargetArmAds", "Cads", "v6Lang"], false)),
+        "ccompiler.v6langp"       => Some((vec!["TargetOption", "TargetArmAds", "Cads", "v6LangP"], false)),
+        "ccompiler.short_enums"   => Some((vec!["TargetOption", "TargetArmAds", "Cads", "vShortEn"], true)),
+        "ccompiler.short_wchar"   => Some((vec!["TargetOption", "TargetArmAds", "Cads", "vShortWch"], true)),
+        "ccompiler.misc"          => Some((vec!["TargetOption", "TargetArmAds", "Cads", "VariousControls", "MiscControls"], false)),
+        // asm
+        "asm.misc"                => Some((vec!["TargetOption", "TargetArmAds", "Aads", "VariousControls", "MiscControls"], false)),
         // output
-        "output.hex"          => Some((vec!["TargetOption", "TargetCommonOption", "CreateHexFile"], true)),
-        "output.name"         => Some((vec!["TargetOption", "TargetCommonOption", "OutputName"], false)),
-        "output.debug_info"   => Some((vec!["TargetOption", "TargetCommonOption", "DebugInformation"], true)),
+        "output.hex"              => Some((vec!["TargetOption", "TargetCommonOption", "CreateHexFile"], true)),
+        "output.name"             => Some((vec!["TargetOption", "TargetCommonOption", "OutputName"], false)),
+        "output.debug_info"       => Some((vec!["TargetOption", "TargetCommonOption", "DebugInformation"], true)),
         // device
-        "device.name"         => Some((vec!["TargetOption", "TargetCommonOption", "Device"], false)),
+        "device.name"             => Some((vec!["TargetOption", "TargetCommonOption", "Device"], false)),
         // linker
-        "linker.scatter"      => Some((vec!["TargetOption", "TargetArmAds", "LDads", "ScatterFile"], false)),
+        "linker.scatter"          => Some((vec!["TargetOption", "TargetArmAds", "LDads", "ScatterFile"], false)),
+        "linker.misc"             => Some((vec!["TargetOption", "TargetArmAds", "LDads", "Misc"], false)),
         // memory
-        "memory.irom.start"   => Some((vec!["TargetOption", "TargetArmAds", "ArmAdsMisc", "OnChipMemories", "IROM", "StartAddress"], false)),
-        "memory.irom.size"    => Some((vec!["TargetOption", "TargetArmAds", "ArmAdsMisc", "OnChipMemories", "IROM", "Size"], false)),
-        "memory.iram.start"   => Some((vec!["TargetOption", "TargetArmAds", "ArmAdsMisc", "OnChipMemories", "IRAM", "StartAddress"], false)),
-        "memory.iram.size"    => Some((vec!["TargetOption", "TargetArmAds", "ArmAdsMisc", "OnChipMemories", "IRAM", "Size"], false)),
+        "memory.irom.start"       => Some((vec!["TargetOption", "TargetArmAds", "ArmAdsMisc", "OnChipMemories", "IROM", "StartAddress"], false)),
+        "memory.irom.size"        => Some((vec!["TargetOption", "TargetArmAds", "ArmAdsMisc", "OnChipMemories", "IROM", "Size"], false)),
+        "memory.iram.start"       => Some((vec!["TargetOption", "TargetArmAds", "ArmAdsMisc", "OnChipMemories", "IRAM", "StartAddress"], false)),
+        "memory.iram.size"        => Some((vec!["TargetOption", "TargetArmAds", "ArmAdsMisc", "OnChipMemories", "IRAM", "Size"], false)),
+        "memory.xram.start"       => Some((vec!["TargetOption", "TargetArmAds", "ArmAdsMisc", "OnChipMemories", "XRAM", "StartAddress"], false)),
+        "memory.xram.size"        => Some((vec!["TargetOption", "TargetArmAds", "ArmAdsMisc", "OnChipMemories", "XRAM", "Size"], false)),
         _ => None,
     }
 }
+
+/// All valid config keys for display in error messages.
+const VALID_CONFIG_KEYS: &str = "\
+ccompiler.ac6, ccompiler.pcc, ccompiler.optim, ccompiler.otime, \
+ccompiler.c99, ccompiler.gnu, ccompiler.wlevel, ccompiler.strict, \
+ccompiler.one_elf, ccompiler.ropi, ccompiler.rwpi, ccompiler.v6lang, \
+ccompiler.v6langp, ccompiler.short_enums, ccompiler.short_wchar, ccompiler.misc, \
+asm.misc, \
+output.hex, output.name, output.debug_info, \
+device.name, \
+linker.scatter, linker.misc, \
+memory.irom.start, memory.irom.size, memory.iram.start, memory.iram.size, \
+memory.xram.start, memory.xram.size";
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -168,8 +198,7 @@ pub fn config_set(
 ) -> anyhow::Result<()> {
     let (xml_path, is_bool) = resolve_config_path(key)
         .ok_or_else(|| anyhow::anyhow!(
-            "unknown config key: '{}'. Valid keys: ccompiler.optim, ccompiler.c99, ccompiler.gnu, ccompiler.wlevel, ccompiler.misc, output.hex, output.name, output.debug_info, device.name, linker.scatter, memory.irom.start, memory.irom.size, memory.iram.start, memory.iram.size",
-            key
+            "unknown config key: '{}'. Valid keys: {}", key, VALID_CONFIG_KEYS
         ))?;
 
     let mut root = load_xml(path)?;

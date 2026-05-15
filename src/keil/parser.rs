@@ -20,6 +20,7 @@ pub struct Target {
     pub toolset_name: String,
     pub toolset_number: String,
     pub ac6: bool,
+    pub pcc: String,
     pub include_in_build: bool,
     pub device: DeviceInfo,
     pub output: OutputInfo,
@@ -61,6 +62,9 @@ pub struct CCompilerInfo {
     pub lang: u8,
     pub lang_profile: u8,
     pub short_enums: bool,
+    pub short_wchar: bool,
+    pub ropi: bool,
+    pub rwpi: bool,
     pub defines: Vec<String>,
     pub include_paths: Vec<String>,
     pub misc_controls: String,
@@ -181,6 +185,7 @@ fn parse_target(target_node: Node) -> Target {
     let toolset_name = text_of(target_node, "ToolsetName");
     let toolset_number = text_of(target_node, "ToolsetNumber");
     let ac6 = bool_of(target_node, "uAC6");
+    let pcc = text_of(target_node, "pCCUsed");
 
     let target_option = child(target_node, "TargetOption");
 
@@ -255,6 +260,9 @@ fn parse_target(target_node: Node) -> Target {
             .map(|c| text_of(c, "v6LangP").parse::<u8>().unwrap_or(0))
             .unwrap_or(0),
         short_enums: cads.map(|c| bool_of(c, "vShortEn")).unwrap_or(false),
+        short_wchar: cads.map(|c| bool_of(c, "vShortWch")).unwrap_or(false),
+        ropi: cads.map(|c| bool_of(c, "Ropi")).unwrap_or(false),
+        rwpi: cads.map(|c| bool_of(c, "Rwpi")).unwrap_or(false),
         defines: c_various
             .as_ref()
             .map(|v| parse_comma_list(&text_of(*v, "Define")))
@@ -344,6 +352,7 @@ fn parse_target(target_node: Node) -> Target {
         toolset_name,
         toolset_number,
         ac6,
+        pcc,
         include_in_build,
         device,
         output,
@@ -512,6 +521,7 @@ mod tests {
       <ToolsetNumber>0x4</ToolsetNumber>
       <ToolsetName>ARM-ADS</ToolsetName>
       <uAC6>1</uAC6>
+      <pCCUsed>5060528</pCCUsed>
       <TargetOption>
         <TargetCommonOption>
           <Device>STM32H743VITx</Device>
@@ -548,6 +558,9 @@ mod tests {
             <v6Lang>3</v6Lang>
             <v6LangP>5</v6LangP>
             <vShortEn>1</vShortEn>
+            <vShortWch>1</vShortWch>
+            <Ropi>0</Ropi>
+            <Rwpi>0</Rwpi>
             <VariousControls>
               <MiscControls>--diag_suppress=1</MiscControls>
               <Define>USE_HAL_DRIVER,STM32H743xx</Define>
@@ -610,6 +623,7 @@ mod tests {
         assert_eq!(t.toolset_number, "0x4");
         assert_eq!(t.toolset_name, "ARM-ADS");
         assert!(t.ac6);
+        assert_eq!(t.pcc, "5060528");
         assert!(t.include_in_build);
 
         // device
@@ -635,6 +649,9 @@ mod tests {
         assert_eq!(t.c_compiler.lang, 3);
         assert_eq!(t.c_compiler.lang_profile, 5);
         assert!(t.c_compiler.short_enums);
+        assert!(t.c_compiler.short_wchar);
+        assert!(!t.c_compiler.ropi);
+        assert!(!t.c_compiler.rwpi);
         assert_eq!(t.c_compiler.defines, vec!["USE_HAL_DRIVER", "STM32H743xx"]);
         assert_eq!(
             t.c_compiler.include_paths,
@@ -725,6 +742,7 @@ mod tests {
         assert_eq!(t.name, "Minimal");
         assert_eq!(t.toolset_name, "");
         assert!(!t.ac6);
+        assert_eq!(t.pcc, "");
         assert!(t.include_in_build);
         assert_eq!(t.device.name, "");
         assert_eq!(t.c_compiler.defines.len(), 0);
