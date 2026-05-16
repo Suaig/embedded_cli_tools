@@ -266,16 +266,7 @@ fn cmd_info(
     }
 }
 
-fn cmd_config(
-    path_str: &str,
-    target_name: &str,
-    category: &Option<String>,
-    format: OutputFormat,
-) -> anyhow::Result<()> {
-    let (resolved, _) = resolve_project_path(path_str, &None)?;
-    let proj = load_project(&resolved)?;
-    let t = resolve_target(&proj, &Some(target_name.to_string()))?;
-
+fn display_config(t: &Target, category: &Option<String>, format: OutputFormat) {
     let bool_str = |v: bool| -> String { if v { "yes".into() } else { "no".into() } };
 
     let mut pairs: Vec<(String, String)> = vec![
@@ -323,99 +314,9 @@ fn cmd_config(
     if let Some(cat) = category {
         let prefix = format!("{cat}.");
         pairs.retain(|(k, _)| k.starts_with(&prefix));
-        if pairs.is_empty() {
-            anyhow::bail!(
-                "unknown config category: '{}'. Valid: device, output, ccompiler, asm, linker, memory",
-                cat
-            );
-        }
     }
 
     output::display(&OutputValue::KeyValue(pairs), format);
-    Ok(())
-}
-
-fn cmd_defines(
-    path_str: &str,
-    target_name: &str,
-    format: OutputFormat,
-) -> anyhow::Result<()> {
-    let (resolved, _) = resolve_project_path(path_str, &None)?;
-    let proj = load_project(&resolved)?;
-    let t = resolve_target(&proj, &Some(target_name.to_string()))?;
-
-    output::display(&OutputValue::List(t.c_compiler.defines.clone()), format);
-    Ok(())
-}
-
-fn cmd_includes(
-    path_str: &str,
-    target_name: &str,
-    format: OutputFormat,
-) -> anyhow::Result<()> {
-    let (resolved, _) = resolve_project_path(path_str, &None)?;
-    let proj = load_project(&resolved)?;
-    let t = resolve_target(&proj, &Some(target_name.to_string()))?;
-
-    output::display(&OutputValue::List(t.c_compiler.include_paths.clone()), format);
-    Ok(())
-}
-
-fn cmd_groups(
-    path_str: &str,
-    target_name: &str,
-    format: OutputFormat,
-) -> anyhow::Result<()> {
-    let (resolved, _) = resolve_project_path(path_str, &None)?;
-    let proj = load_project(&resolved)?;
-    let t = resolve_target(&proj, &Some(target_name.to_string()))?;
-
-    let headers = vec!["Group".into(), "Files".into()];
-    let rows: Vec<Vec<String>> = t
-        .groups
-        .iter()
-        .map(|g| vec![g.name.clone(), g.files.len().to_string()])
-        .collect();
-    output::display(&OutputValue::Table { headers, rows }, format);
-    Ok(())
-}
-
-fn cmd_files(
-    path_str: &str,
-    target_name: &str,
-    group_filter: &Option<String>,
-    format: OutputFormat,
-) -> anyhow::Result<()> {
-    let (resolved, _) = resolve_project_path(path_str, &None)?;
-    let proj = load_project(&resolved)?;
-    let t = resolve_target(&proj, &Some(target_name.to_string()))?;
-
-    let headers = vec![
-        "Name".into(),
-        "Type".into(),
-        "Path".into(),
-        "Status".into(),
-    ];
-    let mut rows: Vec<Vec<String>> = Vec::new();
-
-    for g in &t.groups {
-        if let Some(filter) = group_filter {
-            if g.name != *filter {
-                continue;
-            }
-        }
-        for f in &g.files {
-            rows.push(vec![
-                f.name.clone(),
-                file_type_str(f.file_type).into(),
-                f.path.clone(),
-                if f.included_in_build { "included" } else { "excluded" }.into(),
-            ]);
-        }
-    }
-
-    output::display(&OutputValue::Table { headers, rows }, format);
-    Ok(())
 }
 
 fn cmd_build(
@@ -466,83 +367,150 @@ fn cmd_build(
 // Public entry point
 // ---------------------------------------------------------------------------
 
+/// Resolve path+project to an actual .uvprojx path (handles both direct and workspace).
+fn resolve_path(path_str: &str, project: &Option<String>) -> anyhow::Result<PathBuf> {
+    let path = PathBuf::from(path_str);
+    if is_workspace_file(&path) {
+        let (resolved, _) = resolve_project_path(path_str, project)?;
+        Ok(resolved)
+    } else if is_project_file(&path) {
+        Ok(path)
+    } else {
+        anyhow::bail!(
+            "unsupported file type: {}. Expected .uvprojx or .uvmpw",
+            path.display()
+        )
+    }
+}
+
 pub fn handle(_cli: &Cli, keil: &super::KeilCommands, cfg: &crate::config::EmbConfig, format: OutputFormat) -> anyhow::Result<()> {
     match keil {
         super::KeilCommands::Info { path, target, project } => {
             cmd_info(path, target, project, format)
         }
-        super::KeilCommands::Config { path, target, category } => {
-            cmd_config(path, target, category, format)
+        super::KeilCommands::Config { path, target, project, category } => {
+            let resolved = resolve_path(path, project)?;
+            let proj = load_project(&resolved)?;
+            let t = resolve_target(&proj, &Some(target.clone()))?;
+            display_config(t, category, format);
+            Ok(())
         }
-        super::KeilCommands::ConfigSet { path, target, key, value } => {
-            editor::config_set(std::path::Path::new(path), target, key, value)?;
+        super::KeilCommands::ConfigSet { path, target, project, key, value } => {
+            let resolved = resolve_path(path, project)?;
+            editor::config_set(&resolved, target, key, value)?;
             output::display(&OutputValue::Message("ok".into()), format);
             Ok(())
         }
-        super::KeilCommands::Defines { path, target } => {
-            cmd_defines(path, target, format)
+        super::KeilCommands::Defines { path, target, project } => {
+            let resolved = resolve_path(path, project)?;
+            let proj = load_project(&resolved)?;
+            let t = resolve_target(&proj, &Some(target.clone()))?;
+            output::display(&OutputValue::List(t.c_compiler.defines.clone()), format);
+            Ok(())
         }
-        super::KeilCommands::DefinesAdd { path, target, macro_name } => {
-            editor::defines_add(std::path::Path::new(path), target, macro_name)?;
+        super::KeilCommands::DefinesAdd { path, target, project, macro_name } => {
+            let resolved = resolve_path(path, project)?;
+            editor::defines_add(&resolved, target, macro_name)?;
             output::display(&OutputValue::Message("ok".into()), format);
             Ok(())
         }
-        super::KeilCommands::DefinesRemove { path, target, macro_name } => {
-            editor::defines_remove(std::path::Path::new(path), target, macro_name)?;
+        super::KeilCommands::DefinesRemove { path, target, project, macro_name } => {
+            let resolved = resolve_path(path, project)?;
+            editor::defines_remove(&resolved, target, macro_name)?;
             output::display(&OutputValue::Message("ok".into()), format);
             Ok(())
         }
-        super::KeilCommands::Includes { path, target } => {
-            cmd_includes(path, target, format)
+        super::KeilCommands::Includes { path, target, project } => {
+            let resolved = resolve_path(path, project)?;
+            let proj = load_project(&resolved)?;
+            let t = resolve_target(&proj, &Some(target.clone()))?;
+            output::display(&OutputValue::List(t.c_compiler.include_paths.clone()), format);
+            Ok(())
         }
-        super::KeilCommands::IncludesAdd { path, target, path_to_add } => {
-            editor::includes_add(std::path::Path::new(path), target, path_to_add)?;
+        super::KeilCommands::IncludesAdd { path, target, project, path_to_add } => {
+            let resolved = resolve_path(path, project)?;
+            editor::includes_add(&resolved, target, path_to_add)?;
             output::display(&OutputValue::Message("ok".into()), format);
             Ok(())
         }
-        super::KeilCommands::IncludesRemove { path, target, path_to_remove } => {
-            editor::includes_remove(std::path::Path::new(path), target, path_to_remove)?;
+        super::KeilCommands::IncludesRemove { path, target, project, path_to_remove } => {
+            let resolved = resolve_path(path, project)?;
+            editor::includes_remove(&resolved, target, path_to_remove)?;
             output::display(&OutputValue::Message("ok".into()), format);
             Ok(())
         }
-        super::KeilCommands::Groups { path, target } => {
-            cmd_groups(path, target, format)
+        super::KeilCommands::Groups { path, target, project } => {
+            let resolved = resolve_path(path, project)?;
+            let proj = load_project(&resolved)?;
+            let t = resolve_target(&proj, &Some(target.clone()))?;
+            let headers = vec!["Group".into(), "Files".into()];
+            let rows: Vec<Vec<String>> = t.groups.iter()
+                .map(|g| vec![g.name.clone(), g.files.len().to_string()])
+                .collect();
+            output::display(&OutputValue::Table { headers, rows }, format);
+            Ok(())
         }
-        super::KeilCommands::Files { path, target, group } => {
-            cmd_files(path, target, group, format)
+        super::KeilCommands::Files { path, target, project, group } => {
+            let resolved = resolve_path(path, project)?;
+            let proj = load_project(&resolved)?;
+            let t = resolve_target(&proj, &Some(target.clone()))?;
+            let headers = vec!["Name".into(), "Type".into(), "Path".into(), "Status".into()];
+            let mut rows: Vec<Vec<String>> = Vec::new();
+            for g in &t.groups {
+                if let Some(filter) = group {
+                    if g.name != *filter { continue; }
+                }
+                for f in &g.files {
+                    rows.push(vec![
+                        f.name.clone(),
+                        file_type_str(f.file_type).into(),
+                        f.path.clone(),
+                        if f.included_in_build { "included" } else { "excluded" }.into(),
+                    ]);
+                }
+            }
+            output::display(&OutputValue::Table { headers, rows }, format);
+            Ok(())
         }
-        super::KeilCommands::GroupAdd { path, target, name } => {
-            editor::group_add(std::path::Path::new(path), target, name)?;
+        super::KeilCommands::GroupAdd { path, target, project, name } => {
+            let resolved = resolve_path(path, project)?;
+            editor::group_add(&resolved, target, name)?;
             output::display(&OutputValue::Message("ok".into()), format);
             Ok(())
         }
-        super::KeilCommands::GroupRemove { path, target, name } => {
-            editor::group_remove(std::path::Path::new(path), target, name)?;
+        super::KeilCommands::GroupRemove { path, target, project, name } => {
+            let resolved = resolve_path(path, project)?;
+            editor::group_remove(&resolved, target, name)?;
             output::display(&OutputValue::Message("ok".into()), format);
             Ok(())
         }
-        super::KeilCommands::GroupRename { path, target, old, new } => {
-            editor::group_rename(std::path::Path::new(path), target, old, new)?;
+        super::KeilCommands::GroupRename { path, target, project, old, new } => {
+            let resolved = resolve_path(path, project)?;
+            editor::group_rename(&resolved, target, old, new)?;
             output::display(&OutputValue::Message("ok".into()), format);
             Ok(())
         }
-        super::KeilCommands::FileAdd { path, target, group, filepath } => {
-            editor::file_add(std::path::Path::new(path), target, group, filepath)?;
+        super::KeilCommands::FileAdd { path, target, project, group, filepath } => {
+            let resolved = resolve_path(path, project)?;
+            editor::file_add(&resolved, target, group, filepath)?;
             output::display(&OutputValue::Message("ok".into()), format);
             Ok(())
         }
-        super::KeilCommands::FileRemove { path, target, group, filename } => {
-            editor::file_remove(std::path::Path::new(path), target, group, filename)?;
+        super::KeilCommands::FileRemove { path, target, project, group, filename } => {
+            let resolved = resolve_path(path, project)?;
+            editor::file_remove(&resolved, target, group, filename)?;
             output::display(&OutputValue::Message("ok".into()), format);
             Ok(())
         }
-        super::KeilCommands::FileExclude { path, target, group, filename } => {
-            editor::file_exclude(std::path::Path::new(path), target, group, filename)?;
+        super::KeilCommands::FileExclude { path, target, project, group, filename } => {
+            let resolved = resolve_path(path, project)?;
+            editor::file_exclude(&resolved, target, group, filename)?;
             output::display(&OutputValue::Message("ok".into()), format);
             Ok(())
         }
-        super::KeilCommands::FileInclude { path, target, group, filename } => {
-            editor::file_include(std::path::Path::new(path), target, group, filename)?;
+        super::KeilCommands::FileInclude { path, target, project, group, filename } => {
+            let resolved = resolve_path(path, project)?;
+            editor::file_include(&resolved, target, group, filename)?;
             output::display(&OutputValue::Message("ok".into()), format);
             Ok(())
         }

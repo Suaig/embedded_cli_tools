@@ -96,21 +96,27 @@ enum KeilCommands {
     },
     /// Show or set target configuration
     Config {
-        /// Path to .uvprojx file
+        /// Path to .uvprojx or .uvmpw file
         path: String,
         /// Target name
         #[arg(short, long)]
         target: String,
+        /// Project name in workspace (for .uvmpw files)
+        #[arg(short, long)]
+        project: Option<String>,
         /// Configuration category to show
         category: Option<String>,
     },
     /// Set a configuration key-value pair
     ConfigSet {
-        /// Path to .uvprojx file
+        /// Path to .uvprojx or .uvmpw file
         path: String,
         /// Target name
         #[arg(short, long)]
         target: String,
+        /// Project name in workspace (for .uvmpw files)
+        #[arg(short, long)]
+        project: Option<String>,
         /// Configuration key
         key: String,
         /// Configuration value
@@ -118,106 +124,139 @@ enum KeilCommands {
     },
     /// List preprocessor defines
     Defines {
-        /// Path to .uvprojx file
+        /// Path to .uvprojx or .uvmpw file
         path: String,
         /// Target name
         #[arg(short, long)]
         target: String,
+        /// Project name in workspace (for .uvmpw files)
+        #[arg(short, long)]
+        project: Option<String>,
     },
     /// Add a preprocessor define
     DefinesAdd {
-        /// Path to .uvprojx file
+        /// Path to .uvprojx or .uvmpw file
         path: String,
         /// Target name
         #[arg(short, long)]
         target: String,
+        /// Project name in workspace (for .uvmpw files)
+        #[arg(short, long)]
+        project: Option<String>,
         /// Macro name to add
         macro_name: String,
     },
     /// Remove a preprocessor define
     DefinesRemove {
-        /// Path to .uvprojx file
+        /// Path to .uvprojx or .uvmpw file
         path: String,
         /// Target name
         #[arg(short, long)]
         target: String,
+        /// Project name in workspace (for .uvmpw files)
+        #[arg(short, long)]
+        project: Option<String>,
         /// Macro name to remove
         macro_name: String,
     },
     /// List include paths
     Includes {
-        /// Path to .uvprojx file
+        /// Path to .uvprojx or .uvmpw file
         path: String,
         /// Target name
         #[arg(short, long)]
         target: String,
+        /// Project name in workspace (for .uvmpw files)
+        #[arg(short, long)]
+        project: Option<String>,
     },
     /// Add an include path
     IncludesAdd {
-        /// Path to .uvprojx file
+        /// Path to .uvprojx or .uvmpw file
         path: String,
         /// Target name
         #[arg(short, long)]
         target: String,
+        /// Project name in workspace (for .uvmpw files)
+        #[arg(short, long)]
+        project: Option<String>,
         /// Include path to add
         path_to_add: String,
     },
     /// Remove an include path
     IncludesRemove {
-        /// Path to .uvprojx file
+        /// Path to .uvprojx or .uvmpw file
         path: String,
         /// Target name
         #[arg(short, long)]
         target: String,
+        /// Project name in workspace (for .uvmpw files)
+        #[arg(short, long)]
+        project: Option<String>,
         /// Include path to remove
         path_to_remove: String,
     },
     /// List source groups
     Groups {
-        /// Path to .uvprojx file
+        /// Path to .uvprojx or .uvmpw file
         path: String,
         /// Target name
         #[arg(short, long)]
         target: String,
+        /// Project name in workspace (for .uvmpw files)
+        #[arg(short, long)]
+        project: Option<String>,
     },
     /// List files in target
     Files {
-        /// Path to .uvprojx file
+        /// Path to .uvprojx or .uvmpw file
         path: String,
         /// Target name
         #[arg(short, long)]
         target: String,
+        /// Project name in workspace (for .uvmpw files)
+        #[arg(short, long)]
+        project: Option<String>,
         /// Filter by group name
         #[arg(short, long)]
         group: Option<String>,
     },
     /// Add a source group
     GroupAdd {
-        /// Path to .uvprojx file
+        /// Path to .uvprojx or .uvmpw file
         path: String,
         /// Target name
         #[arg(short, long)]
         target: String,
+        /// Project name in workspace (for .uvmpw files)
+        #[arg(short, long)]
+        project: Option<String>,
         /// Group name
         name: String,
     },
     /// Remove a source group
     GroupRemove {
-        /// Path to .uvprojx file
+        /// Path to .uvprojx or .uvmpw file
         path: String,
         /// Target name
         #[arg(short, long)]
         target: String,
+        /// Project name in workspace (for .uvmpw files)
+        #[arg(short, long)]
+        project: Option<String>,
         /// Group name
         name: String,
     },
     /// Rename a source group
     GroupRename {
-        /// Path to .uvprojx file
+        /// Path to .uvprojx or .uvmpw file
         path: String,
         /// Target name
         #[arg(short, long)]
         target: String,
+        /// Project name in workspace (for .uvmpw files)
+        #[arg(short, long)]
+        project: Option<String>,
         /// Old group name
         old: String,
         /// New group name
@@ -225,11 +264,14 @@ enum KeilCommands {
     },
     /// Add a file to a group
     FileAdd {
-        /// Path to .uvprojx file
+        /// Path to .uvprojx or .uvmpw file
         path: String,
         /// Target name
         #[arg(short, long)]
         target: String,
+        /// Project name in workspace (for .uvmpw files)
+        #[arg(short, long)]
+        project: Option<String>,
         /// Group name
         #[arg(short, long)]
         group: String,
@@ -238,11 +280,14 @@ enum KeilCommands {
     },
     /// Remove a file from a group
     FileRemove {
-        /// Path to .uvprojx file
+        /// Path to .uvprojx or .uvmpw file
         path: String,
         /// Target name
         #[arg(short, long)]
         target: String,
+        /// Project name in workspace (for .uvmpw files)
+        #[arg(short, long)]
+        project: Option<String>,
         /// Group name
         #[arg(short, long)]
         group: String,
@@ -251,11 +296,14 @@ enum KeilCommands {
     },
     /// Exclude a file from build
     FileExclude {
-        /// Path to .uvprojx file
+        /// Path to .uvprojx or .uvmpw file
         path: String,
         /// Target name
         #[arg(short, long)]
         target: String,
+        /// Project name in workspace (for .uvmpw files)
+        #[arg(short, long)]
+        project: Option<String>,
         /// Group name
         #[arg(short, long)]
         group: String,
@@ -264,11 +312,14 @@ enum KeilCommands {
     },
     /// Include a file in build (un-exclude)
     FileInclude {
-        /// Path to .uvprojx file
+        /// Path to .uvprojx or .uvmpw file
         path: String,
         /// Target name
         #[arg(short, long)]
         target: String,
+        /// Project name in workspace (for .uvmpw files)
+        #[arg(short, long)]
+        project: Option<String>,
         /// Group name
         #[arg(short, long)]
         group: String,
