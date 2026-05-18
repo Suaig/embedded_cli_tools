@@ -33,7 +33,7 @@
 ### 从源码构建
 
 ```bash
-git clone https://github.com/<your-username>/embedded-cli-tools.git
+git clone https://github.com/Suaig/embedded_cli_tools.git
 cd embedded-cli-tools
 cargo build --release
 ```
