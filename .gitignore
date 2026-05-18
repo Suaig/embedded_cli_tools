@@ -1,2 +1,3 @@
 /target
-Test_Project/
+Test_Project/*
+!Test_Project/Test.ioc
