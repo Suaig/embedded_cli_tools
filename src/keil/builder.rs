@@ -296,16 +296,16 @@ fn run_uv4(
 ) -> anyhow::Result<u32> {
     let mut cmd = Command::new(uv4);
 
-    // Suppress GUI
+    // Suppress GUI (-j0 = hide uVision window; -sg is not a valid UV4 flag
+    // and was making UV4 emit an empty log on some installs).
     cmd.arg("-j0");
-    cmd.arg("-sg");
 
     // Build command flag
     cmd.arg(command.uv4_flag());
 
     // Project file (absolute path works best)
     let abs_project = std::path::absolute(project)?;
-    cmd.arg(abs_project);
+    cmd.arg(&abs_project);
 
     // Optional target
     if let Some(t) = target {
@@ -315,7 +315,8 @@ fn run_uv4(
     // Log output
     cmd.arg("-o").arg(log_file);
 
-    let status = cmd.status()
+    let status = cmd
+        .status()
         .with_context(|| format!("failed to execute UV4 at {}", uv4.display()))?;
 
     // UV4 exit code semantics: 0=success, 1=warnings, 2+=errors, 20=special errors
@@ -329,7 +330,6 @@ fn run_clean(
 ) -> anyhow::Result<BuildResult> {
     let mut cmd = Command::new(uv4);
     cmd.arg("-j0");
-    cmd.arg("-sg");
     cmd.arg("-c");
 
     let abs_project = std::path::absolute(project)?;

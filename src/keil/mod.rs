@@ -1,6 +1,8 @@
 pub mod parser;
 pub mod editor;
 pub mod builder;
+pub mod map;
+pub mod locate;
 
 pub use parser::{
     load_project, load_workspace,
@@ -9,6 +11,8 @@ pub use parser::{
 };
 
 use std::path::PathBuf;
+
+use anyhow::Context;
 
 use crate::output::{self, OutputFormat, OutputValue};
 
@@ -526,5 +530,67 @@ pub fn handle(_cli: &Cli, keil: &super::KeilCommands, cfg: &crate::config::EmbCo
         super::KeilCommands::Flash { path, target } => {
             cmd_build(path, target, builder::BuildCommand::Flash, cfg, format)
         }
+        super::KeilCommands::Map { path } => {
+            let info = map::parse_map(&PathBuf::from(path))?;
+            cmd_map(&info, format);
+            Ok(())
+        }
+        super::KeilCommands::Locate { path, target, element } => {
+            let text = std::fs::read_to_string(&PathBuf::from(path))
+                .with_context(|| format!("read {}", path))?;
+            let snip = match element.as_str() {
+                "defines" | "define" => locate::defines(&text, target)?,
+                "includes" | "include" | "includepath" => locate::includes(&text, target)?,
+                other => locate::config_key(&text, target, other)?,
+            };
+            let pairs = vec![
+                ("Element".into(), element.clone()),
+                ("Start Line".into(), snip.start_line.to_string()),
+                ("End Line".into(), snip.end_line.to_string()),
+            ];
+            output::display(&OutputValue::KeyValue(pairs), format);
+            output::display(&OutputValue::Message(snip.raw), format);
+            Ok(())
+        }
     }
+}
+
+/// Render parsed .map info: totals (KeyValue) + execution regions (Table).
+fn cmd_map(info: &map::MapInfo, format: OutputFormat) {
+    let human = |b: u64| format!("{b} ({:.2}KiB)", b as f64 / 1024.0);
+    let pairs: Vec<(String, String)> = vec![
+        ("Entry Point".into(), format!("0x{:08X}", info.entry_point)),
+        ("Code (inc data)".into(), human(info.totals.code)),
+        ("RO Data".into(), human(info.totals.ro_data)),
+        ("RW Data".into(), human(info.totals.rw_data)),
+        ("ZI Data".into(), human(info.totals.zi_data)),
+        ("Total RO".into(), human(info.totals.ro_size)),
+        ("Total RW".into(), human(info.totals.rw_size)),
+        ("Total ROM".into(), human(info.totals.rom_size)),
+    ];
+    output::display(&OutputValue::KeyValue(pairs), format);
+
+    let headers: Vec<String> = vec![
+        "Region".into(),
+        "Exec Base".into(),
+        "Load Base".into(),
+        "Size".into(),
+        "Max".into(),
+        "Attr".into(),
+    ];
+    let rows: Vec<Vec<String>> = info
+        .regions
+        .iter()
+        .map(|r| {
+            vec![
+                r.name.clone(),
+                format!("0x{:08X}", r.exec_base),
+                format!("0x{:08X}", r.load_base),
+                format!("0x{:X} ({})", r.size, r.size),
+                format!("0x{:X}", r.max),
+                r.attr.clone(),
+            ]
+        })
+        .collect();
+    output::display(&OutputValue::Table { headers, rows }, format);
 }

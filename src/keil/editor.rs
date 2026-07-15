@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, ensure};
-use xmltree::{Element, XMLNode};
+use xmltree::{Element, EmitterConfig, XMLNode};
 
 // ---------------------------------------------------------------------------
 // XML tree helpers
@@ -28,8 +28,20 @@ fn save_xml(root: &Element, path: &Path) -> anyhow::Result<()> {
     {
         let mut file = fs::File::create(&tmp_path)
             .with_context(|| format!("failed to create temp file {}", tmp_path.display()))?;
-        // xmltree::Element::write() emits its own XML declaration
-        root.write(&mut file)
+        // xmltree::Element::write() emits compact single-line XML that destroys
+        // the original formatting (collapses a 3000-line .uvprojx to 1 line).
+        // Use write_with_config with perform_indent + 2-space indent_string so
+        // output stays readable and diff-friendly. Caveat: xmltree does not
+        // preserve the blank lines the CubeMX/Keil generator puts between
+        // elements, so the FIRST edit still produces a diff that drops those
+        // blank lines — but structure and indentation are preserved, and
+        // subsequent edits are stable.
+        let config = EmitterConfig {
+            perform_indent: true,
+            indent_string: std::borrow::Cow::Borrowed("  "),
+            ..EmitterConfig::default()
+        };
+        root.write_with_config(&mut file, config)
             .with_context(|| "failed to write XML content")?;
     }
 

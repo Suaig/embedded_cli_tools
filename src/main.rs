@@ -358,6 +358,21 @@ enum KeilCommands {
         #[arg(short, long)]
         target: Option<String>,
     },
+    /// Analyze a Keil armlink .map file (totals + execution regions)
+    Map {
+        /// Path to Keil .map file
+        path: String,
+    },
+    /// Locate an XML element (line + raw snippet) for AI-assisted editing
+    Locate {
+        /// Path to .uvprojx file
+        path: String,
+        /// Target name
+        #[arg(short, long)]
+        target: String,
+        /// Element: `defines` | `includes` | any config tag (Optim, uAC6, ScatterFile, CreateHexFile, ...)
+        element: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -626,13 +641,43 @@ enum DebugCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Debug using Keil
+    /// Debug a Keil target via UV4 -d (batch/scripted, non-interactive)
     Keil {
         /// Path to .uvprojx file
         path: String,
-        /// Target name
+        /// Target name (default: first target in project)
         #[arg(short, long)]
         target: Option<String>,
+        /// Read memory at addr (hex), optional size in bytes: 0x58001408 or 0x58001408%16
+        #[arg(long)]
+        read: Option<String>,
+        /// Dump memory range start,end (hex): 0x20000000,0x20000100
+        #[arg(long)]
+        dump: Option<String>,
+        /// Read CPU registers (R0-R3,R12-R15,xPSR)
+        #[arg(long)]
+        regs: bool,
+        /// Set breakpoint at function/address (e.g. main or 0x08000100)
+        #[arg(long = "break")]
+        break_: Option<String>,
+        /// Run to function/address (temp breakpoint + go)
+        #[arg(long = "run-to")]
+        run_to: Option<String>,
+        /// Single-step (into) N times
+        #[arg(long)]
+        step: Option<usize>,
+        /// Single-step (over) N times
+        #[arg(long)]
+        pstep: Option<usize>,
+        /// Use a custom .ini file (must contain its own EXIT)
+        #[arg(long)]
+        ini: Option<String>,
+        /// UV4 -d timeout in seconds
+        #[arg(long, default_value_t = 60)]
+        timeout: u64,
+        /// Skip the initial RESET
+        #[arg(long = "no-reset")]
+        no_reset: bool,
     },
 }
 
@@ -718,7 +763,10 @@ fn main() -> anyhow::Result<()> {
             ioc::handle(command, &cfg, format)
         }
         Some(Commands::Serial { command }) => serial::handle(command, format),
-        Some(Commands::Debug { command }) => debug::handle(command, format),
+        Some(Commands::Debug { command }) => {
+            let cfg = config::load();
+            debug::handle(command, &cfg, format)
+        }
         Some(Commands::Config { command }) => handle_config(command, format),
         None => {
             anyhow::bail!("no command specified");
