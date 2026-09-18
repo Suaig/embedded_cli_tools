@@ -36,12 +36,23 @@ fn file_type_str(ft: u8) -> &'static str {
 }
 
 /// Optimization level: current value + full option map (differs by AC5/AC6).
+///
+/// uVision stores the 0-based index into the C/C++ "Optimization" dropdown, so
+/// the AC6 labels below are the dropdown's own wording.
 fn optim_str(level: u8, ac6: bool) -> String {
     if ac6 {
-        const OPTIONS: &str = "[0=default 1=O0 2=O1 3=O2 4=O3 5=Ofast 6=Os 7=Oz 8=Omax]";
+        const OPTIONS: &str =
+            "[0=<default> 1=-O0 2=-O1 3=-O2 4=-O3 5=-Ofast 6=-Os balanced 7=-Oz image size 8=-Omax]";
         let label = match level {
-            0 => "default", 1 => "O0", 2 => "O1", 3 => "O2",
-            4 => "O3", 5 => "Ofast", 6 => "Os", 7 => "Oz", 8 => "Omax",
+            0 => "<default>",
+            1 => "-O0",
+            2 => "-O1",
+            3 => "-O2",
+            4 => "-O3",
+            5 => "-Ofast",
+            6 => "-Os balanced",
+            7 => "-Oz image size",
+            8 => "-Omax",
             _ => "?",
         };
         format!("{level} ({label}) {OPTIONS}")
@@ -56,16 +67,35 @@ fn optim_str(level: u8, ac6: bool) -> String {
 }
 
 /// Warning level: current value + full option map.
-fn wlevel_str(level: u8) -> String {
-    const OPTIONS: &str = "[0=None 1=Low 2=Medium 3=High]";
-    let label = match level {
-        0 => "None",
-        1 => "Low",
-        2 => "Medium",
-        3 => "High",
-        _ => "?",
-    };
-    format!("{level} ({label}) {OPTIONS}")
+///
+/// uVision stores the 0-based index into the C/C++ (AC6) "Warnings" dropdown,
+/// whose first entry is `<unspecified>` — the same convention as `optim_str`.
+/// The AC5 branch's labels have not been verified against uVision and are left
+/// as they were.
+fn wlevel_str(level: u8, ac6: bool) -> String {
+    if ac6 {
+        const OPTIONS: &str =
+            "[0=<unspecified> 1=No Warnings 2=All Warnings 3=AC5-like Warnings 4=MISRA Compatible]";
+        let label = match level {
+            0 => "<unspecified>",
+            1 => "No Warnings",
+            2 => "All Warnings",
+            3 => "AC5-like Warnings",
+            4 => "MISRA Compatible",
+            _ => "?",
+        };
+        format!("{level} ({label}) {OPTIONS}")
+    } else {
+        const OPTIONS: &str = "[0=None 1=Low 2=Medium 3=High]";
+        let label = match level {
+            0 => "None",
+            1 => "Low",
+            2 => "Medium",
+            3 => "High",
+            _ => "?",
+        };
+        format!("{level} ({label}) {OPTIONS}")
+    }
 }
 
 /// v6Lang: C language standard for AC6 + full option map.
@@ -270,7 +300,23 @@ fn cmd_info(
     }
 }
 
-fn display_config(t: &Target, category: &Option<String>, format: OutputFormat) {
+/// Top-level category names present in a config key list, in first-seen order.
+fn config_categories(pairs: &[(String, String)]) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    for (key, _) in pairs {
+        let category = key.split('.').next().unwrap_or(key).to_string();
+        if !seen.contains(&category) {
+            seen.push(category);
+        }
+    }
+    seen
+}
+
+fn display_config(
+    t: &Target,
+    category: &Option<String>,
+    format: OutputFormat,
+) -> anyhow::Result<()> {
     let bool_str = |v: bool| -> String { if v { "yes".into() } else { "no".into() } };
 
     let mut pairs: Vec<(String, String)> = vec![
@@ -294,7 +340,7 @@ fn display_config(t: &Target, category: &Option<String>, format: OutputFormat) {
         ("ccompiler.otime".into(), bool_str(t.c_compiler.optimize_time)),
         ("ccompiler.c99".into(), bool_str(t.c_compiler.c99)),
         ("ccompiler.gnu".into(), bool_str(t.c_compiler.gnu)),
-        ("ccompiler.wlevel".into(), wlevel_str(t.c_compiler.warning_level)),
+        ("ccompiler.wlevel".into(), wlevel_str(t.c_compiler.warning_level, t.ac6)),
         ("ccompiler.strict".into(), bool_str(t.c_compiler.strict)),
         ("ccompiler.one_elf".into(), bool_str(t.c_compiler.one_elf)),
         ("ccompiler.ropi".into(), bool_str(t.c_compiler.ropi)),
@@ -317,35 +363,41 @@ fn display_config(t: &Target, category: &Option<String>, format: OutputFormat) {
 
     if let Some(cat) = category {
         let prefix = format!("{cat}.");
+        let available = config_categories(&pairs);
         pairs.retain(|(k, _)| k.starts_with(&prefix));
+        if pairs.is_empty() {
+            anyhow::bail!(
+                "no configuration keys match category '{}' (available: {})",
+                cat,
+                available.join(", ")
+            );
+        }
     }
 
     output::display(&OutputValue::KeyValue(pairs), format);
+    Ok(())
 }
 
 fn cmd_build(
     path_str: &str,
     target: &Option<String>,
+    project: &Option<String>,
     command: builder::BuildCommand,
     cfg: &crate::config::EmbConfig,
     format: OutputFormat,
 ) -> anyhow::Result<()> {
-    let path = PathBuf::from(path_str);
-
-    // For workspace files, resolve the sub-project first
-    let project_path = if is_workspace_file(&path) {
-        let (resolved, _) = resolve_project_path(path_str, &None)?;
-        resolved
-    } else if is_project_file(&path) {
-        path
-    } else {
-        anyhow::bail!(
-            "unsupported file type: {}. Expected .uvprojx or .uvmpw",
-            path.display()
-        );
-    };
+    // For workspace files this resolves the sub-project selected by `-p`.
+    let project_path = resolve_path(path_str, project)?;
 
     let uv4_path = crate::config::resolve_uv4(cfg).ok();
+
+    // Reject an unknown target here rather than handing it to UV4, which
+    // reports it as a silent "Success: no" with no diagnostics.
+    if let Some(name) = target {
+        let proj = load_project(&project_path)?;
+        resolve_target(&proj, &Some(name.clone()))?;
+    }
+
     let result = builder::build(&project_path, target, command, uv4_path)?;
 
     let mut pairs = vec![
@@ -364,7 +416,7 @@ fn cmd_build(
     }
 
     output::display(&OutputValue::KeyValue(pairs), format);
-    Ok(())
+    ensure_build_succeeded(&result)
 }
 
 // ---------------------------------------------------------------------------
@@ -396,8 +448,7 @@ pub fn handle(_cli: &Cli, keil: &super::KeilCommands, cfg: &crate::config::EmbCo
             let resolved = resolve_path(path, project)?;
             let proj = load_project(&resolved)?;
             let t = resolve_target(&proj, &Some(target.clone()))?;
-            display_config(t, category, format);
-            Ok(())
+            display_config(t, category, format)
         }
         super::KeilCommands::ConfigSet { path, target, project, key, value } => {
             let resolved = resolve_path(path, project)?;
@@ -458,6 +509,17 @@ pub fn handle(_cli: &Cli, keil: &super::KeilCommands, cfg: &crate::config::EmbCo
             let resolved = resolve_path(path, project)?;
             let proj = load_project(&resolved)?;
             let t = resolve_target(&proj, &Some(target.clone()))?;
+            if let Some(filter) = group {
+                if !t.groups.iter().any(|g| g.name == *filter) {
+                    let available: Vec<&str> =
+                        t.groups.iter().map(|g| g.name.as_str()).collect();
+                    anyhow::bail!(
+                        "group '{}' not found (available: {})",
+                        filter,
+                        available.join(", ")
+                    );
+                }
+            }
             let headers = vec!["Name".into(), "Type".into(), "Path".into(), "Status".into()];
             let mut rows: Vec<Vec<String>> = Vec::new();
             for g in &t.groups {
@@ -518,26 +580,27 @@ pub fn handle(_cli: &Cli, keil: &super::KeilCommands, cfg: &crate::config::EmbCo
             output::display(&OutputValue::Message("ok".into()), format);
             Ok(())
         }
-        super::KeilCommands::Build { path, target } => {
-            cmd_build(path, target, builder::BuildCommand::Build, cfg, format)
+        super::KeilCommands::Build { path, target, project } => {
+            cmd_build(path, target, project, builder::BuildCommand::Build, cfg, format)
         }
-        super::KeilCommands::Rebuild { path, target } => {
-            cmd_build(path, target, builder::BuildCommand::Rebuild, cfg, format)
+        super::KeilCommands::Rebuild { path, target, project } => {
+            cmd_build(path, target, project, builder::BuildCommand::Rebuild, cfg, format)
         }
-        super::KeilCommands::Clean { path, target } => {
-            cmd_build(path, target, builder::BuildCommand::Clean, cfg, format)
+        super::KeilCommands::Clean { path, target, project } => {
+            cmd_build(path, target, project, builder::BuildCommand::Clean, cfg, format)
         }
-        super::KeilCommands::Flash { path, target } => {
-            cmd_build(path, target, builder::BuildCommand::Flash, cfg, format)
+        super::KeilCommands::Flash { path, target, project } => {
+            cmd_build(path, target, project, builder::BuildCommand::Flash, cfg, format)
         }
         super::KeilCommands::Map { path } => {
             let info = map::parse_map(&PathBuf::from(path))?;
             cmd_map(&info, format);
             Ok(())
         }
-        super::KeilCommands::Locate { path, target, element } => {
-            let text = std::fs::read_to_string(&PathBuf::from(path))
-                .with_context(|| format!("read {}", path))?;
+        super::KeilCommands::Locate { path, target, element, project } => {
+            let resolved = resolve_path(path, project)?;
+            let text = std::fs::read_to_string(&resolved)
+                .with_context(|| format!("read {}", resolved.display()))?;
             let snip = match element.as_str() {
                 "defines" | "define" => locate::defines(&text, target)?,
                 "includes" | "include" | "includepath" => locate::includes(&text, target)?,
@@ -587,10 +650,132 @@ fn cmd_map(info: &map::MapInfo, format: OutputFormat) {
                 format!("0x{:08X}", r.exec_base),
                 format!("0x{:08X}", r.load_base),
                 format!("0x{:X} ({})", r.size, r.size),
-                format!("0x{:X}", r.max),
+                format!("0x{:X} ({})", r.max, r.max),
                 r.attr.clone(),
             ]
         })
         .collect();
     output::display(&OutputValue::Table { headers, rows }, format);
+}
+
+/// Turn a finished UV4 run into a command outcome.
+///
+/// UV4 reports "built but nothing succeeded" as `Success: no` on stdout rather
+/// than as a process failure, so a bare `Ok(())` here would make the CLI exit 0
+/// on a broken build.
+fn ensure_build_succeeded(result: &builder::BuildResult) -> anyhow::Result<()> {
+    if result.success {
+        return Ok(());
+    }
+
+    let mut msg = format!(
+        "build failed: {} error(s), {} warning(s)",
+        result.errors, result.warnings
+    );
+    if result.output_file.is_empty() {
+        msg.push_str("; UV4 produced no output file");
+    }
+    let tail: Vec<&str> = result
+        .log
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .rev()
+        .take(5)
+        .collect();
+    if !tail.is_empty() {
+        msg.push_str("\nUV4 log (last lines):");
+        for line in tail.iter().rev() {
+            msg.push_str("\n  ");
+            msg.push_str(line.trim_end());
+        }
+    }
+    anyhow::bail!(msg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_result(success: bool, errors: u32) -> builder::BuildResult {
+        builder::BuildResult {
+            success,
+            errors,
+            warnings: 0,
+            build_time: String::new(),
+            program_size: None,
+            output_file: String::new(),
+            log: String::new(),
+        }
+    }
+
+    #[test]
+    fn successful_build_is_ok() {
+        assert!(ensure_build_succeeded(&build_result(true, 0)).is_ok());
+    }
+
+    #[test]
+    fn failed_build_is_an_error() {
+        let err = ensure_build_succeeded(&build_result(false, 3)).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("3 error(s)"),
+            "error should report the error count: {msg}"
+        );
+    }
+
+    /// uVision stores the 0-based index into the C/C++ (AC6) "Warnings"
+    /// dropdown, whose first entry is `<unspecified>`.
+    #[test]
+    fn ac6_warning_levels_match_the_uvision_dropdown() {
+        for (value, label) in [
+            (0, "<unspecified>"),
+            (1, "No Warnings"),
+            (2, "All Warnings"),
+            (3, "AC5-like Warnings"),
+            (4, "MISRA Compatible"),
+        ] {
+            let s = wlevel_str(value, true);
+            assert!(s.starts_with(&format!("{value} ({label})")), "wLevel {value}: {s}");
+        }
+    }
+
+    /// Same convention for Optimization, whose first entry is `<default>`.
+    #[test]
+    fn ac6_optimisation_labels_match_the_uvision_dropdown() {
+        for (value, label) in [
+            (0, "<default>"),
+            (1, "-O0"),
+            (2, "-O1"),
+            (3, "-O2"),
+            (4, "-O3"),
+            (5, "-Ofast"),
+            (6, "-Os balanced"),
+            (7, "-Oz image size"),
+            (8, "-Omax"),
+        ] {
+            let s = optim_str(value, true);
+            assert!(s.starts_with(&format!("{value} ({label})")), "Optim {value}: {s}");
+        }
+    }
+
+    /// A value outside the dropdown must still say which value was read.
+    #[test]
+    fn out_of_range_levels_keep_the_raw_number() {
+        assert!(optim_str(9, true).starts_with("9 ("));
+        assert!(wlevel_str(9, true).starts_with("9 ("));
+    }
+
+    #[test]
+    fn config_categories_are_deduplicated_in_order() {
+        let pairs = vec![
+            ("device.name".to_string(), "x".to_string()),
+            ("output.name".to_string(), "x".to_string()),
+            ("output.hex".to_string(), "x".to_string()),
+            ("ccompiler.optim".to_string(), "x".to_string()),
+        ];
+        assert_eq!(
+            config_categories(&pairs),
+            ["device", "output", "ccompiler"]
+        );
+    }
 }

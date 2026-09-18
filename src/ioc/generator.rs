@@ -9,6 +9,13 @@ use std::time::{Duration, Instant};
 /// STM32CubeMX.exe is a launcher that spawns a JVM and returns immediately,
 /// so we must wait for the actual generation to complete by polling the output.
 pub fn generate(path: &Path, cubemx_path: Option<&Path>) -> anyhow::Result<()> {
+    // Checked before launching anything: CubeMX is a heavyweight JVM, and
+    // handed a missing .ioc it dies with a NullPointerException only after the
+    // full timeout has elapsed.
+    if !path.is_file() {
+        anyhow::bail!("ioc file not found: {}", path.display());
+    }
+
     let exe = match cubemx_path {
         Some(p) => p.to_path_buf(),
         None => find_cubemx()?,
@@ -21,7 +28,7 @@ pub fn generate(path: &Path, cubemx_path: Option<&Path>) -> anyhow::Result<()> {
         );
     }
 
-    let project_dir = path.parent().unwrap_or(Path::new("."));
+    let project_dir = project_dir_of(path);
     let project_name = path
         .file_stem()
         .unwrap_or_default()
@@ -40,7 +47,13 @@ pub fn generate(path: &Path, cubemx_path: Option<&Path>) -> anyhow::Result<()> {
         project_dir.display(),
     );
 
-    let script_path = std::env::temp_dir().join(format!("emb_cubemx_{}.txt", project_name));
+    // Unique per run so that the completion poll and the "still running" report
+    // below can only ever refer to this invocation's CubeMX process.
+    let script_path = std::env::temp_dir().join(format!(
+        "emb_cubemx_{}_{}.txt",
+        project_name,
+        uuid::Uuid::new_v4().simple()
+    ));
     fs::write(&script_path, &script_content)?;
 
     // Launch CubeMX (launcher returns immediately, JVM runs in background)
@@ -69,12 +82,38 @@ pub fn generate(path: &Path, cubemx_path: Option<&Path>) -> anyhow::Result<()> {
         }
     }
 
+    // `-q` does not dismiss CubeMX dialogs, so a run that never produced the
+    // .uvprojx may still be alive and waiting for a human. Report it rather than
+    // killing it: a dialog the user is about to answer is one click away from
+    // succeeding, and killing it would throw that work away.
+    let lingering = if found {
+        Vec::new()
+    } else {
+        find_cubemx_pids(&script_path)
+    };
+
     // Clean up temp script
     let _ = fs::remove_file(&script_path);
 
     if !found {
+        let hint = if lingering.is_empty() {
+            "No CubeMX process is still running for this invocation.".to_string()
+        } else {
+            let pids: Vec<String> = lingering.iter().map(u32::to_string).collect();
+            format!(
+                "CubeMX is still running as PID {} — answer its dialog and re-run, \
+                 or stop it with `taskkill {}`.",
+                pids.join(", "),
+                pids.iter()
+                    .map(|p| format!("/PID {p} /F"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        };
         anyhow::bail!(
-            "STM32CubeMX generation timed out after {}s. Check ~/.stm32cubemx/STM32CubeMX.log for errors.",
+            "STM32CubeMX generation timed out after {}s. \
+             If CubeMX opened a confirmation dialog, it is waiting for you to answer it — \
+             `-q` script mode does not dismiss it. {hint} Otherwise check ~/.stm32cubemx/STM32CubeMX.log.",
             timeout.as_secs()
         );
     }
@@ -83,6 +122,53 @@ pub fn generate(path: &Path, cubemx_path: Option<&Path>) -> anyhow::Result<()> {
     fix_cubemx_path_bugs(project_dir, &project_name);
 
     Ok(())
+}
+
+/// The directory to run the CubeMX launcher in.
+///
+/// `Path::new("Fan.ioc").parent()` is `Some("")`, and `Command::current_dir("")`
+/// fails with ERROR_INVALID_NAME on Windows, so a bare filename must fall back to
+/// the current directory.
+fn project_dir_of(path: &Path) -> &Path {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    }
+}
+
+/// PowerShell that lists the PIDs of processes whose command line mentions
+/// `script_path` — that is the CubeMX JVM the launcher started for this run.
+#[cfg(target_os = "windows")]
+fn find_cubemx_pids_command(script_path: &Path) -> String {
+    format!(
+        "(Get-CimInstance Win32_Process | Where-Object {{ $_.CommandLine -like '*{}*' }}).ProcessId",
+        script_path.display()
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn find_cubemx_pids(script_path: &Path) -> Vec<u32> {
+    let Ok(output) = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &find_cubemx_pids_command(script_path),
+        ])
+        .output()
+    else {
+        return Vec::new();
+    };
+
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .filter_map(|token| token.parse().ok())
+        .collect()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn find_cubemx_pids(_script_path: &Path) -> Vec<u32> {
+    Vec::new()
 }
 
 /// Fix known CubeMX path bugs in the generated .uvprojx:
@@ -185,15 +271,21 @@ pub fn find_cubemx() -> anyhow::Result<PathBuf> {
         return Ok(PathBuf::from(env_path));
     }
 
-    let candidates = [
-        r"C:\Program Files\STMicroelectronics\STM32Cube\STM32CubeMX\STM32CubeMX.exe",
-        r"C:\St\STM32CubeMX\STM32CubeMX.exe",
+    let mut candidates = vec![
+        PathBuf::from(r"C:\Program Files\STMicroelectronics\STM32Cube\STM32CubeMX\STM32CubeMX.exe"),
+        PathBuf::from(r"C:\St\STM32CubeMX\STM32CubeMX.exe"),
     ];
 
-    for candidate in &candidates {
-        let p = PathBuf::from(candidate);
-        if p.exists() {
-            return Ok(p);
+    // The standalone installer defaults to a per-user location.
+    if let Some(base) = std::env::var_os("LOCALAPPDATA") {
+        let base = PathBuf::from(base);
+        candidates.push(base.join("Programs").join("STM32CubeMX").join("STM32CubeMX.exe"));
+        candidates.push(base.join("STM32CubeMX").join("STM32CubeMX.exe"));
+    }
+
+    for p in &candidates {
+        if p.is_file() {
+            return Ok(p.clone());
         }
     }
 
@@ -234,5 +326,33 @@ mod tests {
         let fixed = remove_abs_path_groups(input);
         assert!(fixed.contains("Application/User/Core"));
         assert!(!fixed.contains("D:/Desktop"));
+    }
+
+    /// `Path::new("x.ioc").parent()` is `Some("")`, and `Command::current_dir("")`
+    /// fails with ERROR_INVALID_NAME on Windows, so a bare filename must fall back
+    /// to the current directory.
+    #[test]
+    fn bare_filename_uses_the_current_directory() {
+        assert_eq!(project_dir_of(Path::new("Fan.ioc")), Path::new("."));
+    }
+
+    #[test]
+    fn nested_path_uses_its_parent() {
+        assert_eq!(project_dir_of(Path::new("sub/Fan.ioc")), Path::new("sub"));
+        assert_eq!(
+            project_dir_of(Path::new(r"C:\proj\Fan.ioc")),
+            Path::new(r"C:\proj")
+        );
+    }
+
+    /// The process lookup must key off this run's unique script path, otherwise
+    /// it could report — or stop — an unrelated CubeMX session.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn cubemx_lookup_keys_off_this_runs_script_path() {
+        let script = Path::new(r"C:\Temp\emb_cubemx_Fan_9f3c1a.txt");
+        let cmd = find_cubemx_pids_command(script);
+        assert!(cmd.contains(r"C:\Temp\emb_cubemx_Fan_9f3c1a.txt"), "{cmd}");
+        assert!(cmd.contains("ProcessId"), "{cmd}");
     }
 }

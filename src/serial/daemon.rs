@@ -139,8 +139,8 @@ pub fn start(
 
     // Build the child command: emb --internal-daemon <id> --port <port> --baud <baud> ...
     let exe = std::env::current_exe()?;
-    let data_bits_str = format!("{}", config.data_bits as u8);
-    let stop_bits_str = format!("{}", config.stop_bits as u8);
+    let data_bits_str = crate::serial::port::data_bits_value(config.data_bits).to_string();
+    let stop_bits_str = crate::serial::port::stop_bits_value(config.stop_bits).to_string();
     let parity_str = match config.parity {
         serialport::Parity::None => "none",
         serialport::Parity::Odd => "odd",
@@ -177,9 +177,9 @@ pub fn start(
         id: daemon_id.clone(),
         port_name: port_name.to_string(),
         baud_rate,
-        data_bits: config.data_bits as u8,
+        data_bits: crate::serial::port::data_bits_value(config.data_bits),
         parity: parity_str.to_string(),
-        stop_bits: config.stop_bits as u8,
+        stop_bits: crate::serial::port::stop_bits_value(config.stop_bits),
         pid,
         started_at: chrono_now(),
         status: "running".to_string(),
@@ -260,6 +260,9 @@ pub fn send(id: &str, data: &[u8]) -> anyhow::Result<()> {
 /// Read unread data from a daemon. After reading, the buffer is cleared
 /// so subsequent reads only return new data.
 pub fn read(id: &str) -> anyhow::Result<Vec<u8>> {
+    // A missing state directory means the id is wrong, not that there is no data.
+    read_meta(id)?;
+
     let buf_path = buffer_path(id);
     if !buf_path.exists() {
         return Ok(Vec::new());
@@ -277,6 +280,9 @@ pub fn read(id: &str) -> anyhow::Result<Vec<u8>> {
 
 /// List history entries for a daemon.
 pub fn history(id: &str, limit: Option<usize>) -> anyhow::Result<Vec<HistoryEntry>> {
+    // A missing state directory means the id is wrong, not that there is no history.
+    read_meta(id)?;
+
     let hist_path = history_path(id);
     if !hist_path.exists() {
         return Ok(Vec::new());
@@ -297,6 +303,9 @@ pub fn history(id: &str, limit: Option<usize>) -> anyhow::Result<Vec<HistoryEntr
 
 /// Clear the history file for a daemon.
 pub fn history_clear(id: &str) -> anyhow::Result<()> {
+    // A missing state directory means the id is wrong, not that there is no history.
+    read_meta(id)?;
+
     let hist_path = history_path(id);
     if hist_path.exists() {
         fs::write(&hist_path, &[])?;

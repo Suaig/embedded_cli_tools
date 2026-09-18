@@ -15,20 +15,30 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 /// Grand totals block (all values in bytes).
+///
+/// armlink prints the row as six numbers under five headers, because
+/// `Code (inc. data)` spans two columns:
+///
+/// ```text
+///   Code (inc. data)   RO Data    RW Data    ZI Data      Debug
+///  40828       4176       5408         40      14860     415344   Grand Totals
+/// ```
+///
+/// `code` and the Code column's inline-data share the first header; the latter
+/// is not part of any published total, so every field below maps to the column
+/// whose right edge it is aligned with.
 #[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct MapTotals {
-    /// Code (inc. data) — column 0 of "Grand Totals"
+    /// Code — column 0
     pub code: u64,
-    /// RO Data — column 1
+    /// RO Data — column 2
     pub ro_data: u64,
-    /// RW Data — column 2
+    /// RW Data — column 3
     pub rw_data: u64,
-    /// ZI Data — column 3
+    /// ZI Data — column 4
     pub zi_data: u64,
-    /// Debug — column 4
+    /// Debug — column 5
     pub debug: u64,
-    /// Grand Totals — column 5
-    pub grand: u64,
     /// "Total RO  Size (Code + RO Data)"
     pub ro_size: u64,
     /// "Total RW  Size (RW Data + ZI Data)"
@@ -82,9 +92,12 @@ pub fn parse_map_text(text: &str) -> MapInfo {
             continue;
         }
 
-        // Grand Totals: "332408  59580  351596  213708  5772  8690839  Grand Totals"
+        // Grand Totals: "40828  4176  5408  40  14860  415344  Grand Totals"
         // (only the first match — the real totals line; ignore duplicates like
         // "ELF Image Totals" which do not end with the literal "Grand Totals")
+        //
+        // nums[1] is the Code column's inline data, which no published total
+        // uses, so the remaining columns start at nums[2].
         if t.ends_with("Grand Totals") {
             let nums: Vec<u64> = t
                 .split_whitespace()
@@ -92,11 +105,10 @@ pub fn parse_map_text(text: &str) -> MapInfo {
                 .collect();
             if nums.len() >= 6 {
                 info.totals.code = nums[0];
-                info.totals.ro_data = nums[1];
-                info.totals.rw_data = nums[2];
-                info.totals.zi_data = nums[3];
-                info.totals.debug = nums[4];
-                info.totals.grand = nums[5];
+                info.totals.ro_data = nums[2];
+                info.totals.rw_data = nums[3];
+                info.totals.zi_data = nums[4];
+                info.totals.debug = nums[5];
             }
             continue;
         }
@@ -156,9 +168,16 @@ fn parse_exec_region(line: &str) -> Option<ExecRegion> {
     let load_base = field_hex(inside, "Load base:")?;
     let size = field_hex(inside, "Size:")?;
     let max = field_hex(inside, "Max:")?;
-    // Attribute is the last comma-separated token inside the parens
-    // (e.g. "ABSOLUTE", "ABSOLUTE, COMPRESSED[0x...]").
-    let attr = inside.rsplit(',').next().unwrap_or("").trim().to_string();
+    // Everything after the "Max:" field is the attribute list, e.g. "ABSOLUTE"
+    // or "ABSOLUTE, UNINIT, COMPRESSED[0x000001e4]". Keeping only the last token
+    // dropped the attributes before it.
+    let attr = match inside.find("Max:") {
+        Some(idx) => match inside[idx..].find(',') {
+            Some(comma) => inside[idx + comma + 1..].trim().to_string(),
+            None => String::new(),
+        },
+        None => String::new(),
+    };
 
     Some(ExecRegion {
         name,
@@ -201,13 +220,102 @@ mod tests {
         let info = parse_map_text(SAMPLE);
         assert_eq!(info.entry_point, 0x0800_02cd);
         assert_eq!(info.totals.code, 332408);
-        assert_eq!(info.totals.ro_data, 59580);
-        assert_eq!(info.totals.rw_data, 351596);
-        assert_eq!(info.totals.zi_data, 213708);
-        assert_eq!(info.totals.grand, 8690839);
+        assert_eq!(info.totals.ro_data, 351596);
+        assert_eq!(info.totals.rw_data, 213708);
+        assert_eq!(info.totals.zi_data, 5772);
+        assert_eq!(info.totals.debug, 8690839);
         assert_eq!(info.totals.ro_size, 684004);
         assert_eq!(info.totals.rw_size, 219480);
         assert_eq!(info.totals.rom_size, 686188);
+    }
+
+    /// A verbatim totals block from a real armlink map
+    /// (`MDK-ARM/Boot/Fan_simulator_Boot/Fan_simulator_Boot.map`). UV4's own
+    /// build log for the same image reports
+    /// `Program Size: Code=40828 RO-data=5408 RW-data=40 ZI-data=14860`.
+    const REAL_GRAND_TOTALS: &str = "\
+      Code (inc. data)   RO Data    RW Data    ZI Data      Debug
+     40828       4176       5408         40      14860     415344   Grand Totals
+     40828       4176       5408         40      14860     415344   ELF Image Totals
+     40828       4176       5408         40          0          0   ROM Totals
+    Total RO  Size (Code + RO Data)                46236 (  45.15kB)
+    Total RW  Size (RW Data + ZI Data)             14900 (  14.55kB)
+    Total ROM Size (Code + RO Data + RW Data)      46276 (  45.19kB)
+";
+
+    /// The same block from a real map whose RW data is compressed into ROM
+    /// (`MDK-ARM/Appli/Fan_simulator_Appli_SlotA/...SlotA.map`). Here the ROM
+    /// Totals row's RW Data (0x40BE4) differs from the Grand Totals row's,
+    /// which is what makes "Total ROM = Code + RO + RW" unusable as a check.
+    const REAL_GRAND_TOTALS_COMPRESSED: &str = "\
+      Code (inc. data)   RO Data    RW Data    ZI Data      Debug
+    552912       6068      74804   33767584      43564    2071100   Grand Totals
+    552912       6068      74804     265220      43564    2071100   ELF Image Totals (compressed)
+    552912       6068      74804     265220          0          0   ROM Totals
+    Total RO  Size (Code + RO Data)               627716 ( 613.00kB)
+    Total RW  Size (RW Data + ZI Data)          33811148 (33018.70kB)
+    Total ROM Size (Code + RO Data + RW Data)     892936 ( 872.01kB)
+";
+
+    /// armlink prints the Grand Totals row as six numbers under five headers,
+    /// because `Code (inc. data)` spans two columns — the first holds the Code
+    /// total, the second the code's inline data, which no published total uses:
+    ///
+    /// ```text
+    ///   Code (inc. data)   RO Data    RW Data    ZI Data      Debug
+    ///  40828       4176       5408         40      14860     415344
+    /// ```
+    ///
+    /// Reading the row one column early makes all of RO/RW/ZI wrong, which the
+    /// two totals armlink publishes on every map expose immediately:
+    ///   Total RO = Code + RO Data
+    ///   Total RW = RW Data + ZI Data
+    #[test]
+    fn grand_totals_columns_satisfy_armlink_identities() {
+        let t = parse_map_text(REAL_GRAND_TOTALS).totals;
+
+        assert_eq!(t.code, 40828);
+        assert_eq!(t.ro_data, 5408);
+        assert_eq!(t.rw_data, 40);
+        assert_eq!(t.zi_data, 14860);
+
+        assert_eq!(t.code + t.ro_data, t.ro_size);
+        assert_eq!(t.rw_data + t.zi_data, t.rw_size);
+    }
+
+    /// `rom_size` must come from the map's own "Total ROM Size" line. Computing
+    /// it as Code + RO + RW would agree on an uncompressed image but be wrong
+    /// by tens of megabytes once RW data is compressed into ROM.
+    #[test]
+    fn total_rom_is_read_from_the_map_not_computed() {
+        let t = parse_map_text(REAL_GRAND_TOTALS_COMPRESSED).totals;
+
+        assert_eq!(t.code, 552912);
+        assert_eq!(t.ro_data, 74804);
+        assert_eq!(t.rw_data, 33767584);
+        assert_eq!(t.zi_data, 43564);
+        assert_eq!(t.debug, 2071100);
+
+        assert_eq!(t.code + t.ro_data, t.ro_size);
+        assert_eq!(t.rw_data + t.zi_data, t.rw_size);
+        assert_eq!(t.rom_size, 892936);
+        assert_ne!(t.code + t.ro_data + t.rw_data, t.rom_size);
+    }
+
+    /// Verbatim from a real map: this region carries three attributes, and
+    /// keeping only the last one hid both `ABSOLUTE` and `UNINIT`.
+    const REAL_MULTI_ATTR_REGION: &str = "\
+    Execution Region RW_IRAM1_DTCM_HEAP (Exec base: 0x20001000, Load base: 0x9009a404, Size: 0x0000f000, Max: 0x0000f000, ABSOLUTE, UNINIT, COMPRESSED[0x000001e4])
+";
+
+    #[test]
+    fn keeps_every_attribute_of_an_execution_region() {
+        let info = parse_map_text(REAL_MULTI_ATTR_REGION);
+        assert_eq!(info.regions.len(), 1);
+        assert_eq!(
+            info.regions[0].attr,
+            "ABSOLUTE, UNINIT, COMPRESSED[0x000001e4]"
+        );
     }
 
     #[test]
@@ -225,7 +333,6 @@ mod tests {
         assert_eq!(dtcm.name, "RW_DTCM");
         assert_eq!(dtcm.exec_base, 0x2000_0000);
         assert_eq!(dtcm.load_base, 0x080a_6fe4);
-        // attr is the last comma token, which here is the COMPRESSED[...] part
-        assert!(dtcm.attr.starts_with("COMPRESSED"));
+        assert_eq!(dtcm.attr, "ABSOLUTE, COMPRESSED[0x00000204]");
     }
 }

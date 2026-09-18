@@ -55,7 +55,7 @@ pub fn handle(serial: &super::SerialCommands, format: OutputFormat) -> anyhow::R
                 .map(|p| {
                     vec![
                         p.name.clone(),
-                        p.manufacturer.clone().unwrap_or_else(|| "-".into()),
+                        p.description.clone().unwrap_or_else(|| "-".into()),
                     ]
                 })
                 .collect();

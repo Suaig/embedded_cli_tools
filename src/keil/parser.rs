@@ -450,10 +450,7 @@ pub fn parse_project(content: &str) -> anyhow::Result<KeilProject> {
         .find(|c| c.has_tag_name("Project"))
         .ok_or_else(|| anyhow::anyhow!("no <Project> root element found"))?;
 
-    let schema_version = project_node
-        .attribute("SchemaVersion")
-        .unwrap_or("")
-        .to_string();
+    let schema_version = text_of(project_node, "SchemaVersion");
 
     let targets_node = child(project_node, "Targets").unwrap_or(project_node);
 
@@ -514,7 +511,8 @@ mod tests {
     #[test]
     fn test_parse_minimal_project() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
-<Project SchemaVersion="1.0">
+<Project>
+  <SchemaVersion>1.0</SchemaVersion>
   <Targets>
     <Target>
       <TargetName>TestTarget</TargetName>
@@ -686,6 +684,23 @@ mod tests {
         assert!(!t.groups[0].files[1].included_in_build);
         assert_eq!(t.groups[1].name, "Drivers");
         assert_eq!(t.groups[1].files.len(), 1);
+    }
+
+    /// Real Keil projects — both `.uvprojx` and `.uvmpw` — carry the schema
+    /// version as a child element of `<Project>`, never as an attribute.
+    #[test]
+    fn parses_schema_version_from_the_child_element() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
+<Project xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="project_projx.xsd">
+  <SchemaVersion>2.1</SchemaVersion>
+  <Targets>
+    <Target>
+      <TargetName>Minimal</TargetName>
+    </Target>
+  </Targets>
+</Project>"#;
+
+        assert_eq!(parse_project(xml).unwrap().schema_version, "2.1");
     }
 
     #[test]

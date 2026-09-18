@@ -41,6 +41,23 @@ check_binary() {
     fi
 }
 
+# Test_Project/* is gitignored, so a fresh clone has no test data. Say so up
+# front: without it every case fails, and a run that dies half way through the
+# backup/restore steps hides which result belongs to which case.
+check_test_data() {
+    local missing=()
+    for f in "$WORKSPACE" "$BOOT_PROJ" "$APPLI_PROJ" "$IOC"; do
+        [[ -f "$f" ]] || missing+=("$f")
+    done
+
+    if (( ${#missing[@]} > 0 )); then
+        echo -e "${RED}错误: 缺少测试工程文件${NC}"
+        printf '  %s\n' "${missing[@]}"
+        echo "Test_Project/* 已被 .gitignore 忽略，准备方法见 docs/TEST_SPEC.md"
+        exit 1
+    fi
+}
+
 run_test() {
     local name="$1"
     local expect_exit="${2:-0}"
@@ -92,6 +109,7 @@ info() {
 # 开始
 # ---------------------------------------------------------------------------
 check_binary
+check_test_data
 
 echo "========================================"
 echo "  emb 自动化集成测试"
@@ -151,7 +169,7 @@ run_test "Config ccompiler 无 device"  0  ""                       --ai keil co
 # 验证 ccompiler 过滤不含 device
 do_test_no_cross_contamination() {
     local out
-    out=$("$EMB" --ai keil config "$APPLI_PROJ" -t "Test_Appli" ccompiler 2>&1 | tr -d '\r')
+    out=$("$EMB" --ai keil config "$APPLI_PROJ" -t "Test_Appli" ccompiler 2>&1 | tr -d '\r' || true)
     if echo "$out" | grep -q "^device\."; then
         echo -e "  ${RED}FAIL${NC}  Config ccompiler 过滤不该含 device.*"
         FAIL=$((FAIL + 1))
@@ -176,7 +194,7 @@ cp "$APPLI_PROJ" "$APPLI_PROJ.testbak"
 # 修改 optim
 out=$("$EMB" keil config-set "$APPLI_PROJ" -t "Test_Appli" ccompiler.optim 2 2>&1 || true)
 if echo "$out" | grep -q "ok"; then
-    out2=$("$EMB" --ai keil config "$APPLI_PROJ" -t "Test_Appli" ccompiler 2>&1 | tr -d '\r')
+    out2=$("$EMB" --ai keil config "$APPLI_PROJ" -t "Test_Appli" ccompiler 2>&1 | tr -d '\r' || true)
     if echo "$out2" | grep -q "ccompiler.optim:2 (O1)"; then
         echo -e "  ${GREEN}PASS${NC}  Config-set optim=2 生效"
         PASS=$((PASS + 1))
@@ -195,7 +213,7 @@ fi
 # 修改 bool
 out=$("$EMB" keil config-set "$APPLI_PROJ" -t "Test_Appli" ccompiler.c99 no 2>&1 || true)
 if echo "$out" | grep -q "ok"; then
-    out2=$("$EMB" --ai keil config "$APPLI_PROJ" -t "Test_Appli" ccompiler 2>&1 | tr -d '\r')
+    out2=$("$EMB" --ai keil config "$APPLI_PROJ" -t "Test_Appli" ccompiler 2>&1 | tr -d '\r' || true)
     if echo "$out2" | grep -q "ccompiler.c99:no"; then
         echo -e "  ${GREEN}PASS${NC}  Config-set c99=no 生效"
         PASS=$((PASS + 1))
@@ -232,7 +250,7 @@ run_test "Defines 含 STM32H7R7xx" 0  "STM32H7R7xx"    --ai keil defines "$APPLI
 cp "$APPLI_PROJ" "$APPLI_PROJ.testbak"
 
 "$EMB" keil defines-add "$APPLI_PROJ" -t "Test_Appli" TEST_MACRO >/dev/null 2>&1
-out=$("$EMB" --ai keil defines "$APPLI_PROJ" -t "Test_Appli" 2>&1 | tr -d '\r')
+out=$("$EMB" --ai keil defines "$APPLI_PROJ" -t "Test_Appli" 2>&1 | tr -d '\r' || true)
 if echo "$out" | grep -q "TEST_MACRO"; then
     echo -e "  ${GREEN}PASS${NC}  Defines-add 生效"
     PASS=$((PASS + 1))
@@ -242,7 +260,7 @@ else
 fi
 
 "$EMB" keil defines-remove "$APPLI_PROJ" -t "Test_Appli" TEST_MACRO >/dev/null 2>&1
-out=$("$EMB" --ai keil defines "$APPLI_PROJ" -t "Test_Appli" 2>&1 | tr -d '\r')
+out=$("$EMB" --ai keil defines "$APPLI_PROJ" -t "Test_Appli" 2>&1 | tr -d '\r' || true)
 if echo "$out" | grep -qv "TEST_MACRO"; then
     echo -e "  ${GREEN}PASS${NC}  Defines-remove 生效"
     PASS=$((PASS + 1))
@@ -263,7 +281,7 @@ run_test "Includes 列表"  0  "Drivers"  --ai keil includes "$APPLI_PROJ" -t "T
 cp "$APPLI_PROJ" "$APPLI_PROJ.testbak"
 
 "$EMB" keil includes-add "$APPLI_PROJ" -t "Test_Appli" "./TestInc" >/dev/null 2>&1
-out=$("$EMB" --ai keil includes "$APPLI_PROJ" -t "Test_Appli" 2>&1 | tr -d '\r')
+out=$("$EMB" --ai keil includes "$APPLI_PROJ" -t "Test_Appli" 2>&1 | tr -d '\r' || true)
 if echo "$out" | grep -q "TestInc"; then
     echo -e "  ${GREEN}PASS${NC}  Includes-add 生效"
     PASS=$((PASS + 1))
@@ -273,7 +291,7 @@ else
 fi
 
 "$EMB" keil includes-remove "$APPLI_PROJ" -t "Test_Appli" "./TestInc" >/dev/null 2>&1
-out=$("$EMB" --ai keil includes "$APPLI_PROJ" -t "Test_Appli" 2>&1 | tr -d '\r')
+out=$("$EMB" --ai keil includes "$APPLI_PROJ" -t "Test_Appli" 2>&1 | tr -d '\r' || true)
 if echo "$out" | grep -qv "TestInc"; then
     echo -e "  ${GREEN}PASS${NC}  Includes-remove 生效"
     PASS=$((PASS + 1))
@@ -311,7 +329,7 @@ run_test "IOC 精确 key"           0  "STM32H7R7I8Kx"     ioc get "$IOC" Mcu.Na
 cp "$IOC" "$IOC.testbak"
 
 "$EMB" ioc set "$IOC" TEST.Key 12345 >/dev/null 2>&1
-out=$("$EMB" ioc get "$IOC" TEST 2>&1 | tr -d '\r')
+out=$("$EMB" ioc get "$IOC" TEST 2>&1 | tr -d '\r' || true)
 if echo "$out" | grep -q "12345"; then
     echo -e "  ${GREEN}PASS${NC}  IOC set 生效"
     PASS=$((PASS + 1))
@@ -369,7 +387,7 @@ echo ""
 # =========================================
 echo "--- 13. 输出格式 ---"
 
-out=$("$EMB" --json keil info "$APPLI_PROJ" 2>&1 | tr -d '\r')
+out=$("$EMB" --json keil info "$APPLI_PROJ" 2>&1 | tr -d '\r' || true)
 if echo "$out" | grep -q '"headers"' && echo "$out" | grep -q '"rows"'; then
     echo -e "  ${GREEN}PASS${NC}  JSON Keil info 含 headers/rows"
     PASS=$((PASS + 1))
@@ -378,7 +396,7 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-out=$("$EMB" --json ioc get "$IOC" Mcu.Name 2>&1 | tr -d '\r')
+out=$("$EMB" --json ioc get "$IOC" Mcu.Name 2>&1 | tr -d '\r' || true)
 if echo "$out" | grep -q "STM32H7R7I8Kx"; then
     echo -e "  ${GREEN}PASS${NC}  JSON IOC get"
     PASS=$((PASS + 1))
@@ -400,7 +418,7 @@ else
     info "jq 未安装，跳过 JSON 结构验证" ""
 fi
 
-out=$("$EMB" --ai keil config "$APPLI_PROJ" -t "Test_Appli" ccompiler 2>&1 | head -3 | tr -d '\r')
+out=$("$EMB" --ai keil config "$APPLI_PROJ" -t "Test_Appli" ccompiler 2>&1 | head -3 | tr -d '\r' || true)
 if echo "$out" | grep -qE "(ccompiler\.[a-z_]+:.*\[.*\])"; then
     echo -e "  ${GREEN}PASS${NC}  AI 模式 config 含可选值范围"
     PASS=$((PASS + 1))
@@ -409,7 +427,7 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-out=$("$EMB" keil files "$APPLI_PROJ" -t "Test_Appli" 2>&1 | tr -d '\r')
+out=$("$EMB" keil files "$APPLI_PROJ" -t "Test_Appli" 2>&1 | tr -d '\r' || true)
 if echo "$out" | grep -qE "^(┌|├|└|│)"; then
     echo -e "  ${GREEN}PASS${NC}  Human 模式含 comfy-table 框线"
     PASS=$((PASS + 1))
@@ -424,8 +442,8 @@ echo ""
 # =========================================
 echo "--- 14. Workspace 一致性 ---"
 
-out_direct=$("$EMB" --ai keil info "$BOOT_PROJ" -t "Test_Boot" 2>&1 | tr -d '\r' | grep "Target:" | head -1)
-out_ws=$("$EMB" --ai keil info "$WORKSPACE" -t "Test_Boot" 2>&1 | tr -d '\r' | grep "Target:" | head -1)
+out_direct=$("$EMB" --ai keil info "$BOOT_PROJ" -t "Test_Boot" 2>&1 | tr -d '\r' | grep "Target:" | head -1 || true)
+out_ws=$("$EMB" --ai keil info "$WORKSPACE" -t "Test_Boot" 2>&1 | tr -d '\r' | grep "Target:" | head -1 || true)
 if [[ "$out_direct" == "$out_ws" ]]; then
     echo -e "  ${GREEN}PASS${NC}  Workpace 与单项目 info 一致"
     PASS=$((PASS + 1))
@@ -436,8 +454,8 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-out_direct=$("$EMB" --ai keil defines "$APPLI_PROJ" -t "Test_Appli" 2>&1 | tr -d '\r' | sort)
-out_ws=$("$EMB" --ai keil defines "$WORKSPACE" -t "Test_Appli" -p "Test_Appli.uvprojx" 2>&1 | tr -d '\r' | sort)
+out_direct=$("$EMB" --ai keil defines "$APPLI_PROJ" -t "Test_Appli" 2>&1 | tr -d '\r' | sort || true)
+out_ws=$("$EMB" --ai keil defines "$WORKSPACE" -t "Test_Appli" -p "Test_Appli.uvprojx" 2>&1 | tr -d '\r' | sort || true)
 if [[ "$out_direct" == "$out_ws" ]]; then
     echo -e "  ${GREEN}PASS${NC}  Workspace 与单项目 defines 一致"
     PASS=$((PASS + 1))

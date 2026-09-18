@@ -23,6 +23,25 @@ Workspace 子项目映射：
 - `.\Boot\Test_Boot.uvprojx` — 第一个子项目（默认选择）
 - `.\Appli\Test_Appli.uvprojx` — 第二个子项目
 
+#### 准备测试数据
+
+**`Test_Project/*` 已被 `.gitignore` 忽略（仅 `Test.ioc` 入库）**，因此从仓库克隆后 `tests/run_tests.sh`
+无法直接运行 —— 脚本会在开头检查并明确报出缺失文件后退出。
+
+准备方法：取任意一个真实的 STM32H7RS 双项目 Keil 工作区，按上表放到 `Test_Project/` 下，并把
+子项目 target 名改为 `Test_Boot` / `Test_Appli`（其余断言按 §3 各用例的"关键验证"列核对：
+
+- Appli 子项目的 defines 含 `USE_HAL_DRIVER`、`STM32H7R7xx`
+- Appli 子项目的 include path 含 `Drivers/` 路径
+- Appli 子项目的 group 含 `Application/`、`Drivers/` 前缀
+- 两个子项目均为 AC6（`<uAC6>1</uAC6>`），Device 为 `STM32H7R7I8Kx`
+- `Project.uvmpw` 中 `.\Boot\Test_Boot.uvprojx` 在前、`.\Appli\Test_Appli.uvprojx` 在后）
+
+`Test.ioc` 已在库中，无需另备。
+
+> 注意：`run_tests.sh` 会就地修改并还原 `Test_Appli.uvprojx` 与 `Test.ioc`（用 `.testbak` 备份），
+> 因此不要在 `Test_Project/` 里放你还要继续编辑的工程。
+
 ---
 
 ## 2. 单元测试 (`cargo test`)

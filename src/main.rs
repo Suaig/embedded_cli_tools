@@ -333,6 +333,9 @@ enum KeilCommands {
         /// Target name
         #[arg(short, long)]
         target: Option<String>,
+        /// Project name in workspace (for .uvmpw files)
+        #[arg(short, long)]
+        project: Option<String>,
     },
     /// Rebuild the project
     Rebuild {
@@ -341,6 +344,9 @@ enum KeilCommands {
         /// Target name
         #[arg(short, long)]
         target: Option<String>,
+        /// Project name in workspace (for .uvmpw files)
+        #[arg(short, long)]
+        project: Option<String>,
     },
     /// Clean build artifacts
     Clean {
@@ -349,6 +355,9 @@ enum KeilCommands {
         /// Target name
         #[arg(short, long)]
         target: Option<String>,
+        /// Project name in workspace (for .uvmpw files)
+        #[arg(short, long)]
+        project: Option<String>,
     },
     /// Flash firmware to target
     Flash {
@@ -357,6 +366,9 @@ enum KeilCommands {
         /// Target name
         #[arg(short, long)]
         target: Option<String>,
+        /// Project name in workspace (for .uvmpw files)
+        #[arg(short, long)]
+        project: Option<String>,
     },
     /// Analyze a Keil armlink .map file (totals + execution regions)
     Map {
@@ -372,6 +384,9 @@ enum KeilCommands {
         target: String,
         /// Element: `defines` | `includes` | any config tag (Optim, uAC6, ScatterFile, CreateHexFile, ...)
         element: String,
+        /// Project name in workspace (for .uvmpw files)
+        #[arg(short, long)]
+        project: Option<String>,
     },
 }
 
@@ -727,16 +742,13 @@ fn main() -> anyhow::Result<()> {
             "even" => serialport::Parity::Even,
             _ => serialport::Parity::None,
         };
-        let data_bits = match db {
-            5 => serialport::DataBits::Five,
-            6 => serialport::DataBits::Six,
-            7 => serialport::DataBits::Seven,
-            _ => serialport::DataBits::Eight,
-        };
-        let stop_bits = match sb {
-            2 => serialport::StopBits::Two,
-            _ => serialport::StopBits::One,
-        };
+        // The parent writes actual bit counts. Anything else means the two sides
+        // of this internal contract have drifted apart — a programming error, not
+        // something to paper over with a silent default.
+        let data_bits = serial::port::data_bits_from_value(db)
+            .expect("internal --data-bits must be 5, 6, 7 or 8");
+        let stop_bits = serial::port::stop_bits_from_value(sb)
+            .expect("internal --stop-bits must be 1 or 2");
         let config = serial::port::SerialConfig::new(baud_rate, data_bits, parity, stop_bits);
         return serial::daemon::serve(daemon_id, port_name, baud_rate, &config);
     }

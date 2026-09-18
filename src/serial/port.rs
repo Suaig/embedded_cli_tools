@@ -6,7 +6,9 @@ use std::time::Duration;
 #[derive(Debug, Clone)]
 pub struct PortInfo {
     pub name: String,
-    pub manufacturer: Option<String>,
+    /// Human-readable label: the WMI friendly name when available, otherwise the
+    /// driver's manufacturer string.
+    pub description: Option<String>,
 }
 
 /// Serial port configuration.
@@ -29,6 +31,16 @@ impl SerialConfig {
     }
 }
 
+/// The label to show for a port.
+///
+/// The WMI friendly name wins: the driver's manufacturer string alone
+/// ("Prolific", "Microsoft") cannot tell two boards apart, and USB serial ports
+/// — the ones this tool exists for — always have a manufacturer, so treating it
+/// as a fallback for the friendly name means the friendly name is never shown.
+fn port_label(friendly: Option<&str>, manufacturer: Option<&str>) -> Option<String> {
+    friendly.or(manufacturer).map(ToOwned::to_owned)
+}
+
 /// Scan available serial ports.
 /// Returns an empty list (not an error) if no ports are found.
 pub fn scan() -> anyhow::Result<Vec<PortInfo>> {
@@ -37,23 +49,22 @@ pub fn scan() -> anyhow::Result<Vec<PortInfo>> {
         .into_iter()
         .map(|p| PortInfo {
             name: p.port_name.clone(),
-            manufacturer: match &p.port_type {
+            description: match &p.port_type {
                 serialport::SerialPortType::UsbPort(info) => info.manufacturer.clone(),
                 _ => None,
             },
         })
         .collect();
 
-    // On Windows, supplement with friendly names
+    // On Windows, replace with the friendly name where one is known.
     #[cfg(target_os = "windows")]
     {
         let wmi_names = query_wmi_port_names();
         for port in &mut result {
-            if port.manufacturer.is_none() {
-                if let Some(friendly) = wmi_names.get(&port.name) {
-                    port.manufacturer = Some(friendly.clone());
-                }
-            }
+            port.description = port_label(
+                wmi_names.get(&port.name).map(String::as_str),
+                port.description.as_deref(),
+            );
         }
     }
 
@@ -98,6 +109,48 @@ fn query_wmi_port_names() -> std::collections::HashMap<String, String> {
     map
 }
 
+/// The line settings carried on the daemon command line as `--data-bits`.
+///
+/// These are the actual bit counts, not the `DataBits` discriminants: the
+/// discriminant of `DataBits::Eight` is 3, which the child process would read
+/// back as neither 5, 6, 7 nor 8 and quietly fall back to 8 data bits.
+pub fn data_bits_value(bits: DataBits) -> u8 {
+    match bits {
+        DataBits::Five => 5,
+        DataBits::Six => 6,
+        DataBits::Seven => 7,
+        DataBits::Eight => 8,
+    }
+}
+
+/// Inverse of `data_bits_value`; `None` for anything the parent never sends.
+pub fn data_bits_from_value(value: u8) -> Option<DataBits> {
+    match value {
+        5 => Some(DataBits::Five),
+        6 => Some(DataBits::Six),
+        7 => Some(DataBits::Seven),
+        8 => Some(DataBits::Eight),
+        _ => None,
+    }
+}
+
+/// The line settings carried on the daemon command line as `--stop-bits`.
+pub fn stop_bits_value(bits: StopBits) -> u8 {
+    match bits {
+        StopBits::Two => 2,
+        _ => 1,
+    }
+}
+
+/// Inverse of `stop_bits_value`; `None` for anything the parent never sends.
+pub fn stop_bits_from_value(value: u8) -> Option<StopBits> {
+    match value {
+        1 => Some(StopBits::One),
+        2 => Some(StopBits::Two),
+        _ => None,
+    }
+}
+
 /// Send data to a serial port (open, send, close).
 pub fn send(port_name: &str, data: &[u8], config: &SerialConfig) -> anyhow::Result<()> {
     let mut port = serialport::new(port_name, config.baud_rate)
@@ -138,5 +191,81 @@ pub fn recv(port_name: &str, timeout_ms: u64, config: &SerialConfig) -> anyhow::
     }
 
     Ok(received)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `emb serial daemon start` re-spawns itself and passes the line settings
+    /// on the command line. Carrying the enum discriminant here (`Eight as u8`
+    /// is 3) made the child fall back to 8 data bits whatever was requested.
+    #[test]
+    fn data_bits_survive_the_daemon_command_line() {
+        for bits in [
+            DataBits::Five,
+            DataBits::Six,
+            DataBits::Seven,
+            DataBits::Eight,
+        ] {
+            let value = data_bits_value(bits);
+            let round_tripped = data_bits_from_value(value)
+                .unwrap_or_else(|| panic!("{value} is not a value the parent ever sends"));
+            assert_eq!(
+                data_bits_value(round_tripped),
+                value,
+                "data bits {value} did not survive the round trip"
+            );
+        }
+    }
+
+    #[test]
+    fn stop_bits_survive_the_daemon_command_line() {
+        for bits in [StopBits::One, StopBits::Two] {
+            let value = stop_bits_value(bits);
+            let round_tripped = stop_bits_from_value(value)
+                .unwrap_or_else(|| panic!("{value} is not a value the parent ever sends"));
+            assert_eq!(
+                stop_bits_value(round_tripped),
+                value,
+                "stop bits {value} did not survive the round trip"
+            );
+        }
+    }
+
+    #[test]
+    fn discriminant_values_are_rejected() {
+        // 0..=3 are the discriminants of Five..Eight, never valid counts.
+        for bad in 0..=3 {
+            assert!(data_bits_from_value(bad).is_none(), "{bad} accepted");
+        }
+        assert!(data_bits_from_value(9).is_none());
+        assert!(stop_bits_from_value(0).is_none());
+        assert!(stop_bits_from_value(3).is_none());
+    }
+
+    /// Real values from this machine: COM6 is a PL2303, whose driver reports the
+    /// manufacturer as just "Prolific" — useless for telling two boards apart.
+    #[test]
+    fn the_friendly_name_wins_over_the_manufacturer() {
+        assert_eq!(
+            port_label(
+                Some("Prolific PL2303GT USB Serial COM Port (COM6)"),
+                Some("Prolific")
+            ),
+            Some("Prolific PL2303GT USB Serial COM Port (COM6)".to_string())
+        );
+    }
+
+    #[test]
+    fn the_manufacturer_is_only_a_fallback() {
+        assert_eq!(
+            port_label(None, Some("Prolific")),
+            Some("Prolific".to_string())
+        );
+        assert_eq!(port_label(None, None), None);
+        assert_eq!(port_label(Some("USB Serial Device (COM4)"), None),
+                   Some("USB Serial Device (COM4)".to_string()));
+    }
 }
 

@@ -59,8 +59,11 @@ pub struct BuildResult {
 /// Search order:
 /// 1. `UV4_PATH` environment variable
 /// 2. `KEIL_PATH` environment variable (expects root like `C:\Keil_v5`)
-/// 3. Common fixed paths
-/// 4. Scan `C:\Program Files` and `C:\Program Files (x86)` for Keil directories
+/// 3. The Keil registry entry (covers per-user installs under
+///    `%LOCALAPPDATA%\Keil_v5`, which no fixed path reaches)
+/// 4. Common fixed paths
+/// 5. `%LOCALAPPDATA%` candidates
+/// 6. Scan `C:\Program Files` and `C:\Program Files (x86)` for Keil directories
 pub fn find_uv4() -> anyhow::Result<PathBuf> {
     // 1. Explicit UV4_PATH
     if let Ok(p) = std::env::var("UV4_PATH") {
@@ -78,7 +81,12 @@ pub fn find_uv4() -> anyhow::Result<PathBuf> {
         }
     }
 
-    // 3. Common fixed paths
+    // 3. Registry
+    if let Some(uv4) = uv4_from_registry() {
+        return Ok(uv4);
+    }
+
+    // 4. Common fixed paths
     let common = [
         r"C:\Keil_v5\UV4\UV4.exe",
         r"C:\Keil\UV4\UV4.exe",
@@ -87,6 +95,19 @@ pub fn find_uv4() -> anyhow::Result<PathBuf> {
         let path = PathBuf::from(p);
         if path.is_file() {
             return Ok(path);
+        }
+    }
+
+    // 5. %LOCALAPPDATA% — where the per-user MDK installer puts Keil_v5
+    let mut local_appdata_candidates: Vec<PathBuf> = Vec::new();
+    if let Some(base) = std::env::var_os("LOCALAPPDATA") {
+        let base = PathBuf::from(base);
+        local_appdata_candidates.push(base.join("Keil_v5").join("UV4").join("UV4.exe"));
+        local_appdata_candidates.push(base.join("Keil").join("UV4").join("UV4.exe"));
+    }
+    for path in &local_appdata_candidates {
+        if path.is_file() {
+            return Ok(path.clone());
         }
     }
 
@@ -123,6 +144,78 @@ pub fn find_uv4() -> anyhow::Result<PathBuf> {
          Set UV4_PATH to the full path of UV4.exe, \
          or set KEIL_PATH to the Keil installation root (e.g. C:\\Keil_v5)"
     )
+}
+
+/// Read the Keil MDK install root out of the registry and return UV4.exe.
+///
+/// Recent MDK installers default to a per-user location under
+/// `%LOCALAPPDATA%\Keil_v5`, which none of the fixed paths reach, but the
+/// installer always records it here. The value names the ARM toolchain
+/// directory (`...\Keil_v5\ARM`), so UV4 is its sibling.
+#[cfg(target_os = "windows")]
+fn uv4_from_registry() -> Option<PathBuf> {
+    const KEYS: [&str; 2] = [
+        r"HKLM\SOFTWARE\WOW6432Node\Keil\Products\MDK",
+        r"HKLM\SOFTWARE\Keil\Products\MDK",
+    ];
+
+    for key in KEYS {
+        let Ok(output) = Command::new("reg")
+            .args(["query", key, "/v", "Path"])
+            .output()
+        else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let Some(arm_dir) = parse_reg_path(&stdout) else {
+            continue;
+        };
+        if let Some(uv4) = uv4_beside_arm_dir(Path::new(&arm_dir)) {
+            if uv4.is_file() {
+                return Some(uv4);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+fn uv4_from_registry() -> Option<PathBuf> {
+    None
+}
+
+/// Pull the `REG_SZ` value out of `reg query` output:
+///
+/// ```text
+/// HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Keil\Products\MDK
+///     Path    REG_SZ    C:\Users\me\AppData\Local\Keil_v5\ARM
+/// ```
+fn parse_reg_path(stdout: &str) -> Option<String> {
+    for line in stdout.lines() {
+        let line = line.trim();
+        if !line.starts_with("Path") {
+            continue;
+        }
+        if let Some(idx) = line.find("REG_SZ") {
+            let value = line[idx + "REG_SZ".len()..].trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// `...\Keil_v5\ARM` -> `...\Keil_v5\UV4\UV4.exe`.
+fn uv4_beside_arm_dir(arm_dir: &Path) -> Option<PathBuf> {
+    let root = arm_dir.parent()?;
+    if root.as_os_str().is_empty() {
+        return None;
+    }
+    Some(root.join("UV4").join("UV4.exe"))
 }
 
 /// Prefer UV4.com (console output) when available; fall back to UV4.exe.
@@ -354,4 +447,42 @@ fn run_clean(
         output_file: String::new(),
         log: String::new(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verbatim `reg query HKLM\SOFTWARE\WOW6432Node\Keil\Products\MDK /v Path`.
+    const REG_HIT: &str = "\r\n\
+HKEY_LOCAL_MACHINE\\SOFTWARE\\WOW6432Node\\Keil\\Products\\MDK\r\n\
+    Path    REG_SZ    C:\\Users\\me\\AppData\\Local\\Keil_v5\\ARM\r\n\r\n";
+
+    /// Verbatim output when the key is absent.
+    const REG_MISS: &str = "\r\n\
+ERROR: The system was unable to find the specified registry key or value.\r\n\r\n";
+
+    #[test]
+    fn parses_the_install_root_out_of_reg_query_output() {
+        assert_eq!(
+            parse_reg_path(REG_HIT).as_deref(),
+            Some(r"C:\Users\me\AppData\Local\Keil_v5\ARM")
+        );
+    }
+
+    #[test]
+    fn registry_miss_yields_nothing() {
+        assert_eq!(parse_reg_path(REG_MISS), None);
+        assert_eq!(parse_reg_path(""), None);
+    }
+
+    /// The registry records the ARM toolchain directory; UV4 is its sibling.
+    #[test]
+    fn uv4_sits_beside_the_registered_arm_directory() {
+        assert_eq!(
+            uv4_beside_arm_dir(Path::new(r"C:\Users\me\AppData\Local\Keil_v5\ARM")).as_deref(),
+            Some(Path::new(r"C:\Users\me\AppData\Local\Keil_v5\UV4\UV4.exe"))
+        );
+        assert_eq!(uv4_beside_arm_dir(Path::new("ARM")), None);
+    }
 }

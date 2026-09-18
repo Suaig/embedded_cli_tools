@@ -1,0 +1,139 @@
+//! Shared fixtures for the CLI-level integration tests.
+//!
+//! These drive the real binary through `CARGO_BIN_EXE_emb` and deliberately use
+//! minimal hand-written projects so that no Keil installation or toolchain is
+//! required.
+//!
+//! Not every test binary uses every helper, so silence the per-binary dead-code
+//! warnings.
+#![allow(dead_code)]
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+/// A single-target .uvprojx, small enough to keep in the test source.
+pub fn project_xml(target: &str, define: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<Project>
+  <SchemaVersion>2.1</SchemaVersion>
+  <Targets>
+    <Target>
+      <TargetName>{target}</TargetName>
+      <ToolsetNumber>0x4</ToolsetNumber>
+      <ToolsetName>ARM-ADS</ToolsetName>
+      <TargetOption>
+        <TargetCommonOption>
+          <Device>STM32H7R7L8Hx</Device>
+          <OutputName>{target}</OutputName>
+          <OutputDirectory>.\Objects\</OutputDirectory>
+          <CreateExecutable>1</CreateExecutable>
+          <CreateHexFile>1</CreateHexFile>
+        </TargetCommonOption>
+        <CommonProperty>
+          <IncludeInBuild>1</IncludeInBuild>
+        </CommonProperty>
+        <TargetArmAds>
+          <Cads>
+            <Optim>0</Optim>
+            <VariousControls>
+              <Define>{define}</Define>
+              <IncludePath>..\Core\Inc</IncludePath>
+            </VariousControls>
+          </Cads>
+        </TargetArmAds>
+      </TargetOption>
+      <Groups>
+        <Group>
+          <GroupName>Application</GroupName>
+          <Files>
+            <File>
+              <FileName>main.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\main.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+      </Groups>
+    </Target>
+  </Targets>
+</Project>
+"#
+    )
+}
+
+/// A scratch directory unique to this test binary.
+fn scratch_dir() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("emb_cli_test_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Write the single-project fixture and return its path.
+pub fn write_fixture(name: &str) -> PathBuf {
+    let path = scratch_dir().join(name);
+    std::fs::write(&path, project_xml("OnlyTarget", "USE_HAL_DRIVER")).unwrap();
+    path
+}
+
+/// Write a two-project workspace and return the `.uvmpw` path.
+///
+/// The sub-projects have different target names and different defines, so a
+/// test can tell which one `-p <project>` actually selected.
+pub fn write_workspace(name: &str) -> PathBuf {
+    let root = scratch_dir().join(name);
+    let _ = std::fs::remove_dir_all(&root);
+
+    for (sub, project, target, define) in [
+        ("SubA", "a.uvprojx", "TargetA", "DEFINE_A"),
+        ("SubB", "b.uvprojx", "TargetB", "DEFINE_B"),
+    ] {
+        let dir = root.join(sub);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(project), project_xml(target, define)).unwrap();
+    }
+
+    let ws = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
+<ProjectWorkspace xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <SchemaVersion>1.0</SchemaVersion>
+  <Header>### uVision Project, (C) Keil Software</Header>
+  <WorkspaceName>{}</WorkspaceName>
+  <project>
+    <PathAndName>.\SubA\a.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+  <project>
+    <PathAndName>.\SubB\b.uvprojx</PathAndName>
+    <NodeIsActive>1</NodeIsActive>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+</ProjectWorkspace>
+"#,
+        root.join(name).display()
+    );
+
+    let ws_path = root.join(name);
+    std::fs::write(&ws_path, ws).unwrap();
+    ws_path
+}
+
+/// Run the `emb` binary under test.
+pub fn emb(args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_emb"))
+        .args(args)
+        .output()
+        .expect("failed to run emb")
+}
+
+/// Run `emb` with `cwd`, returning `(combined stdout+stderr, success)`.
+pub fn emb_in(dir: &Path, args: &[&str]) -> (String, bool) {
+    let out = Command::new(env!("CARGO_BIN_EXE_emb"))
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .expect("failed to run emb");
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    (text, out.status.success())
+}
