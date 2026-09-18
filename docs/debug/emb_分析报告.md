@@ -109,7 +109,7 @@ P0 与 P1 共 5 项（D1、D2、D4、D11 及 D5 的 3 个子项）已于同日�
 
   自动化回归：`src/keil/map.rs` 新增 2 条单测（`grand_totals_columns_satisfy_armlink_identities`、`total_rom_is_read_from_the_map_not_computed`），均先观察失败再实现；并修正了原 `parses_totals_and_entry` 中固化错误映射的断言。
 
-### D3 [高] Keil 写操作全量重写 XML，破坏文件格式
+### D3 [高] Keil 写操作全量重写 XML，破坏文件格式 —— 已修复
 
 - **问题表象**：对同一宏 `defines-add` 再 `defines-remove`（净零改动）后，**1836 行中 1829 行发生变化**，文件 72932 → 70533 字节：
 
@@ -118,15 +118,19 @@ P0 与 P1 共 5 项（D1、D2、D4、D11 及 D5 的 3 个子项）已于同日�
   | 命名空间属性 | `xsi:noNamespaceSchemaLocation="..."` | `noNamespaceSchemaLocation="..."`（**前缀丢失**） |
   | 空元素 | `<MiscControls></MiscControls>` | `<MiscControls />` |
   | 空行 | 保留 | 全部删除 |
-  | 属性顺序 | `Cclass= Cgroup= Cvendor= ...` | 重排为字母序 |
+  | 属性顺序 | `Cclass= Cgroup= Cvendor= ...` | 重排（DOM 用哈希存属性） |
   | 文件结尾 | 有换行 | 无换行 |
   | XML 声明 | `standalone="no"` | 丢失 |
 
-- **影响**：任何 `config-set` / `*-add` / `*-remove` 都让 git diff 变成整文件，code review 无法定位真实改动；`xsi:` 前缀丢失使 schema 位置对标准 XML 解析器失效。UV4 实测能容忍（对重写后的文件 `-b` 返回 0 error），因此不是数据损坏，但**不能称为"格式无损"**，与 README 中"不破坏 XML 格式"的定位不符。
-- **缓解现状**：会生成 `.bak`（覆盖式，不累积）；`locate` + Read + Edit 工作流可完全绕开该问题。
-- **根因**：`src/keil/editor.rs` 用 xmltree 全量解析后再序列化，未做保格式编辑或最小化 diff。
-- **解决方案**：短期在文档/`--ai` 提示中明确"写操作会重写整个 XML"；长期改为按 `locate` 得到的行区间做文本级替换，或序列化后恢复原缩进/空行并按原文属性顺序输出。
-- **验证**：`test_keil_write.py` 的 no-op 往返检查（`defines-add` 后 `defines-remove` 同一宏，净零改动）长期失败于"1836 行中 1829 行变化"，即为本项的常驻回归探针；修复后该检查应转为通过。
+- **影响**：任何 `config-set` / `*-add` / `*-remove` 都让 git diff 变成整文件，code review 无法定位真实改动；`xsi:` 前缀丢失使 schema 位置对标准 XML 解析器失效。
+- **根因**：`src/keil/editor.rs` 的 `save_xml` 用 xmltree 的 DOM 全量解析再序列化；DOM 只保留树结构和文本，不保留空白布局、属性顺序与命名空间前缀的书写形式。
+- **解决方案（采用"序列化后格式化补丁"）**：`save_xml` 在写出后，用**原文**把 DOM 丢掉的格式补回来 —— 还原 XML 声明、直接沿用原文的根元素开标签（连 `xsi:` 前缀一起）、按原文件习惯逐个还原空元素风格（Keil 同一文件里 `<Tag></Tag>` 与 `<Tag/>` 混用，所以只对"原文始终自闭合"的标签保持自闭合，且连 `/>` 前那个空格一起还原）、补结尾换行。四条规则**都不需要位置信息**。
+  - 选择这个方案而不是"按 `locate` 行区间做文本替换"：先测了收益 —— 补丁把净零往返从 1508 行降到 10 行（99.3%），而文本替换需要重写全部 9 个编辑命令，收益只多最后 10 行。
+- **验证**（2026-09-18）：
+  - 真实文件实测：1836 行的工程做净零往返，**变化行数 1508 → 10**。残留 10 行 = 6 行被删的空行 + 2 个元素（`<component>` / `<package>`）的属性顺序，两者都是 DOM 结构上无法恢复的。
+  - `save_xml` 原有的"写回后重新解析校验"步骤在补丁之后执行，因此补丁本身也被纳入校验 —— 补丁若破坏 XML 会立即失败。
+  - 新增 4 条单测（声明/根标签/结尾换行、成对风格、保持自闭合、混用标签不误判）。
+  - 对拍脚本 `test_keil_write.py` 从"36 项 6 失败"变为"37 项 1 失败"，唯一剩下的就是属性顺序那一项。
 
 ### D4 [中] UV4.exe / CubeMX 自动探测覆盖不足 —— 已修复
 
@@ -150,11 +154,17 @@ P0 与 P1 共 5 项（D1、D2、D4、D11 及 D5 的 3 个子项）已于同日�
   1. **裸相对文件名必失败**：`emb ioc generate rel.ioc` 原报 `os error 123`（`Path::new("rel.ioc").parent()` 为 `""`，`Command::current_dir("")` 在 Windows 上失败）。新增 `project_dir_of()`，父目录为空时回退 `.`。
   2. **超时提示误导**：原提示只说"Check ~/.stm32cubemx/STM32CubeMX.log"，而日志里只有 `IP not ready for code generation: LWIP`，看不出真实原因。现提示会说明"可能正在等待 CubeMX 弹窗确认"，并**报出该次运行对应的 CubeMX 进程 PID 与可直接粘贴的停止命令**。临时脚本名加入 uuid，确保 PID 定位只命中本次运行、不会指向无关的 CubeMX 会话。
   3. **不检查输入文件是否存在**：原实现会为不存在的 .ioc 拉起 CubeMX（约 1.6 GB JVM），让它在内部抛 `NullPointerException`，再干等 120 s 并给出误导性的"弹窗"提示。现改为启动前先校验，立即返回 `ioc file not found: <path>`。
+  4. **把"等待应答"当成"失败"**：固定 120 s 到点就报 `generation timed out`，而 CubeMX 此时很可能只是开着对话框等人点。现在分两种情况报：
+     - 进程已退出 → "`.uvprojx` 未产出且 CubeMX 已退出，去看日志"（这是真失败）；
+     - 进程仍在 → "**CubeMX 仍在运行（PID …）**，十有八九在等对话框；`-q` 不会自动应答；请应答后重跑、或加大 `--timeout`、或 `taskkill` 停掉它"。
+
+     并新增 `--timeout <seconds>`（默认 120），知道要手动点对话框的人可以放宽。措辞上不再说"失败"。
 - **未修复 / 设计取舍**：
-  - 超时后**不自动 kill** CubeMX 进程。自动终止看似更干净，但超时窗口恰好覆盖"用户正要点确认"的场景——杀掉会连带丢弃用户即将完成的生成。改为报告 PID + 停止命令，把决定权交回用户。如需改成自动终止，请提出。
+  - 超时后**不自动 kill** CubeMX 进程。自动终止看似更干净，但超时窗口恰好覆盖"用户正要点确认"的场景——杀掉会连带丢弃用户即将完成的生成。改为报告 PID + 停止命令，把决定权交回用户。
   - 完成判定写死为 `<ioc 所在目录>/MDK-ARM/<ioc 文件名>.uvprojx`。本工程 ioc 在工程根、Keil 工程在 `MDK-ARM/Appli|Boot/` 子目录，若 CubeMX 确实按 `ProjectStructure` 写回子目录，则该判定路径永不成立。**仍需在"有人点确认"的前提下复测才能定论**（本次日志停在 `IP not ready for code generation: LWIP`，看不出目标路径）。
   - 脚本把 `project name` 固定为 ioc 文件名（`Fan_simulator`），而工程实际子项目名是 `Fan_simulator_Appli` / `Fan_simulator_Boot`，是否会另生成孤立工程同样待复测。
-- **验证**（2026-09-18）：`emb ioc generate nosuch.ioc`（无任何配置）→ `Error: ioc file not found: nosuch.ioc`，exit 1，166 ms 返回；新增 `tests/cli_ioc_generate.rs` 1 条 CLI 测试（断言快速失败、不启动 CubeMX）。`current_dir` 与 PID 定位各新增单测。
+  - 自动点掉对话框需要截图 + 鼠标操作（computer use 一类能力），CLI 本身做不到；工具的职责是把"正在等一个人"讲清楚，让上层 Agent 决定是否去驱动 GUI。
+- **验证**（2026-09-18）：`emb ioc generate nosuch.ioc`（无任何配置）→ `Error: ioc file not found: nosuch.ioc`，exit 1，166 ms 返回；新增 `tests/cli_ioc_generate.rs` 1 条 CLI 测试（断言快速失败、不启动 CubeMX）。`current_dir`、PID 定位、超时消息分支各新增单测（消息含 PID/`--timeout`/`taskkill`，进程已退出时指向日志）。
 - **测试披露**：`tests/cli_ioc_generate.rs` 未单独跑一次 RED。同一场景（`emb ioc generate nosuch.ioc`）在修复前已实测观察到"启动 CubeMX → 120 s 超时 → 提示未提及文件不存在"的完整行为，即该测试要断言的失败现象；重跑只会再造一个 1.6 GB JVM 而无新增信息。
 
 ### D6 [中] workspace 下 `build`/`rebuild`/`clean`/`flash`/`locate` 不支持 `-p` —— 已修复
@@ -167,7 +177,7 @@ P0 与 P1 共 5 项（D1、D2、D4、D11 及 D5 的 3 个子项）已于同日�
   - 新增 `tests/cli_workspace_project.rs` 4 条 CLI 测试。用两个子项目（`TargetA`/`TargetB`、`DEFINE_A`/`DEFINE_B`）证明 `-p` 真的改变了路由：不带 `-p` 时错误消息列出 `TargetA`，带 `-p b.uvprojx` 时列出 `TargetB`。
   - 真实工程：`emb keil build <Project.uvmpw> -p Fan_simulator_Boot.uvprojx -t NoSuchTarget` → 列出 `Fan_simulator_Boot`（此前是 `Success: no` 静默失败）；`emb keil locate <ws> -p Fan_simulator_Boot.uvprojx -t Fan_simulator_Boot Optim` → 第 317 行，实测该行正是 `Fan_simulator_Boot.uvprojx` 的 `<Optim>7</Optim>`。
 
-### D7 [中] JSON 输出形状随匹配数量/参数而变化 —— 待决策，未修改
+### D7 [中] JSON 输出形状随匹配数量/参数而变化 —— 已修复（方案 B）
 
 - **问题表象**：
   - `emb --json ioc get <ioc> Mcu.Name` → `"STM32H7R7L8Hx"`（标量）
@@ -178,11 +188,26 @@ P0 与 P1 共 5 项（D1、D2、D4、D11 及 D5 的 3 个子项）已于同日�
 
   同类命令的 JSON 类型无法通过命令名推断，消费方必须对每个"命令 + 参数组合"分支处理。
 - **根因**：`src/output/mod.rs` 的 `OutputValue` 用 `#[serde(untagged)]`，四个变体各自序列化成最自然的 JSON；`ioc get` 又在 `src/ioc/mod.rs` 里按"精确命中 → `Message`，前缀命中 → `KeyValue`"选择变体，于是**同一条命令的形状取决于传入的键是否恰好是精确键**——调用方无法预知。
-- **解决方案（待选定）**：这是刻意设计，改动等于改输出契约，不单方面拍板。两个方案：
-  - **方案 A（小改）**：只把 `ioc get` 统一成一种形状，消除唯一真正不可预测的一处。代价是失去 `emb --json ioc get x.ioc Mcu.Name` 直接拿标量的便利。
-  - **方案 B（大改，推荐）**：所有 `--json` 输出加统一的 `kind` 判别字段（`message`/`kv`/`table`/`list`）。Table 形状**增量兼容**（只多一个键，`docs/TEST_SPEC.md` 只断言 `headers`/`rows` 存在）；KeyValue / List / Message 三种会被包裹，属破坏性变更。
-  - 倾向：**方案 B**，但需要确认可以接受 KeyValue/List 的破坏性变更（或接受一个过渡期）。
-- **验证**：`compare_ioc.py` 的 `ioc get GPIO single-match shape` 一条长期失败，即为本项的常驻回归探针；选定方案后该检查应转为通过。
+- **解决方案（方案 B，已实现）**：`OutputValue` 改为**手写 `Serialize`**，每个变体都带 `kind` 判别字段：
+  | kind | 字段 |
+  |---|---|
+  | `message` | `value` |
+  | `kv` | `entries` |
+  | `table` | `headers`、`rows`（**保持顶层**，因此这一种是增量兼容） |
+  | `list` | `items` |
+  | `sections` | `sections`（见 D16） |
+
+  之所以手写而不是用 `#[serde(tag = ...)]`：internally-tagged 不支持 newtype 变体（`Message(String)`），adjacently-tagged（`tag` + `content`）又会把 `headers`/`rows` 推进 `content` 里，破坏 README 与 `TEST_SPEC` 已记录的表格形状。手写既保住了顶层字段，也不用改任何一处调用点。
+- **验证**（2026-09-18）：新增 `tests/cli_json_shape.rs` 4 条 CLI 测试；`src/output/mod.rs` 新增 3 条单测（四种 kind、表格顶层字段、`ioc get` 两种形状可区分）。实测：
+
+  ```
+  $ emb --json ioc get project.ioc Mcu.Name
+  { "kind": "message", "value": "STM32H7R7L8Hx" }
+  $ emb --json ioc get project.ioc GPIO
+  { "kind": "kv", "entries": [["GPIO.groupedBy", "Show All"]] }
+  ```
+
+  `compare_ioc.py` 的常驻探针由"长期 1 失败"变为 **25 项 0 失败**。`docs/TEST_SPEC.md` 的 IT-FMT-01/02 断言的是"合法 JSON""`headers`/`rows` 存在"，仍然成立（表格形状未变）。
 
 ### D8 [中] 过滤条件无匹配时静默成功 —— 已修复
 
@@ -264,12 +289,12 @@ P0 与 P1 共 5 项（D1、D2、D4、D11 及 D5 的 3 个子项）已于同日�
 - **验证**：新增单测 `parses_schema_version_from_the_child_element`（用带 `xmlns:xsi` 的完整真实头部），RED 为 `left: "" right: "2.1"`。
 - **说明**：该字段目前**没有出现在任何输出里**（`info`/`config` 都不展示），所以修复不改变任何命令的可见行为，只是消除了一个"字段名声称有值、实际恒空"的隐患。
 
-### D13 [低] `file-add` 不校验文件是否存在 —— 待确认，未修改
+### D13 [低] `file-add` 不校验文件是否存在 —— 已修复
 
-- **问题表象**：`emb keil file-add <p> -t <t> -g <g> ../../Boot/Core/Src/ghost.c`（磁盘上不存在）→ exit 0 并写入该路径。
-- **根因**：`src/keil/editor.rs` 的 `file_add` 只解析并写入 `<File>` 节点，不做任何路径存在性检查，也没有相应提示。
-- **解决方案（待选定）**：Keil 自身允许添加尚未创建的文件（先登记后补源码是常见做法），所以"直接拒绝"未必对。倾向**保留 exit 0，但在输出中提示 `warning: file does not exist yet`**——既不挡正常流程，也不让 Agent 以为自己路径写对了。
-- **验证**：`test_keil_write.py` 的 `file-add nonexistent path rejected` 一条长期失败，即为本项的常驻回归探针；选定方案后该检查应改为断言"exit 0 且输出含 warning"。
+- **问题表象**：`emb keil file-add <p> -t <t> -g <g> ../../Boot/Core/Src/ghost.c`（磁盘上不存在）→ exit 0 并写入该路径，没有任何提示。
+- **根因**：`src/keil/editor.rs` 的 `file_add` 只解析并写入 `<File>` 节点，不做路径存在性检查，也没有相应输出。
+- **解决方案**：Keil 自身允许添加尚未创建的文件（先登记后补源码是常见做法），所以**保留 exit 0**，但在 `<FilePath>` 相对 `.uvprojx` 目录解析不到文件时向 stderr 打 `warning: '<path>' does not exist yet (looked for <resolved>)`。选 stderr 而非 stdout，是为了不动 `--json` / `--ai` 已有的输出契约。
+- **验证**（2026-09-18）：新增 2 条 CLI 测试 —— 不存在的路径必须 exit 0 且 stderr 含该路径名；存在的路径必须不产生任何 warning（防止修过头）。`test_keil_write.py` 的对应检查由"必须报错"改为"exit 0 且 stderr 含路径名"，两条均通过。
 
 ### D14 [提示] `keil map` 的展示细节 —— 部分修复
 
@@ -299,6 +324,22 @@ P0 与 P1 共 5 项（D1、D2、D4、D11 及 D5 的 3 个子项）已于同日�
   - 用等价的失败命令替换做定点验证：`out=$( (exit 1) | tr -d '\r' )` 在 `set -euo pipefail` 下确实中止（exit 1），加 `|| true` 后正常继续（exit 0）。
   - 实际运行 `bash tests/run_tests.sh`：现在在开头立即报出缺失的 3 个文件并提示准备方法（exit 1），不再跑到中途静默死掉。`Test.ioc` 已在库中，正确地未被列为缺失。
 
+### D16 [中] `--json` 有两条命令会连续打印两个 JSON 文档 —— 已修复
+
+> 实现 D7 方案 B 时发现的同族问题。
+
+- **问题表象**：`emb --json keil map <map>` 的 stdout 是**两个 JSON 对象接在一起**，整体不是合法 JSON：
+
+  ```
+  $ emb --json keil map out.map | jq .
+  parse error: Extra data: line 38 column 1 (char 482)
+  ```
+
+  `emb --json keil locate <proj> -t <T> <el>` 同样（`kv` 段 + 原文片段段）。根因：`cmd_map` 与 `Locate` 分支各调了两次 `output::display()`，而 `display` 每次输出一个完整文档。
+- **影响**：`--json` 的全部价值是能被 `jq` / 脚本直接消费，这两条命令直接违背该契约；`--ai` / human 模式不受影响（本来就是两段文本）。
+- **解决方案**：新增 `OutputValue::Sections(Vec<OutputValue>)` —— JSON 下合成单个 `{"kind":"sections","sections":[…]}`，human/AI 下逐段渲染并用空行分隔，**外观与原来的两次 `display()` 完全一致**。`keil map` 与 `keil locate` 改为一次 `display`。
+- **验证**（2026-09-18）：新增 `tests/cli_json_shape.rs` 4 条 CLI 测试 —— `keil map` / `keil locate` 的 stdout 必须能被 `serde_json::from_str` 一次解析、且段数与 `kind` 正确；`ioc get` 精确/前缀两种命中的 `kind` 必须不同；`keil info` 的表格必须保持 `headers`/`rows` 在顶层。实测 `emb --json keil map out.map | jq` 现在可用；human 模式输出逐字节未变。
+
 ## 6. 未覆盖范围
 
 | 项 | 原因 |
@@ -320,20 +361,45 @@ P0 与 P1 共 5 项（D1、D2、D4、D11 及 D5 的 3 个子项）已于同日�
 | P1 | D4 路径自动探测 | **已修复** | 首次使用即受阻 |
 | P1 | D5 `ioc generate` 输入校验 / 路径 / 超时提示 | **部分修复** | 弹窗等待属 CubeMX 限制；完成判定路径待复测 |
 | P1 | D11 `wLevel` 映射表 | **已修复** | 整表对 AC6 失效 |
-| P1 | D3 XML 格式破坏 | 待修 | 方案需先定（本次未动） |
+| P1 | D3 XML 格式破坏 | **已修复** | 序列化后格式化补丁，净零往返 1508 → 10 行 |
+| P2 | D7 JSON 输出形状 | **已修复**（方案 B：`kind` 判别字段） | KeyValue/List/Message 的包裹是已接受的破坏性变更 |
+| P2 | D16 `--json` 输出多个文档 | **已修复** | `keil map` / `keil locate` 的 stdout 整体不是合法 JSON |
 | P2 | D6 workspace `-p` | **已修复** | 5 个子命令补齐 |
-| P2 | D7 JSON 输出形状 | 待决策 | 改输出契约，需你选方案 A/B |
 | P2 | D8 无匹配静默成功 | **已修复** | |
 | P2 | D9 daemon 串口参数 | **已修复**（定级由"低"升为"高"） | 非默认数据位被静默忽略 |
 | P3 | D10 `serial scan` 名称 | **已修复** | |
 | P3 | D12 `SchemaVersion` | **已修复** | 不改变可见行为，消除隐患 |
-| P3 | D13 `file-add` 校验 | 待确认 | 建议保留 exit 0 + 输出提示 |
+| P3 | D13 `file-add` 校验 | **已修复** | 保留 exit 0，改打 stderr warning |
 | P3 | D14 `keil map` 展示 | **部分修复** | `OCR_RVCT*` 可见性属新功能 |
 | P3 | D15 `run_tests.sh` | **已修复** | |
 
 ## 8. 修复记录（2026-09-18）
 
 累计改动：11 个既有文件 `+868 −123`，另加 5 个新测试文件与本文档。
+
+### 8.7 第二轮：D3 / D5 / D7 / D13 + D16（2026-09-18 同日）
+
+| 项 | 改动 |
+|---|---|
+| D3 | `src/keil/editor.rs` 新增 `restore_keil_format()` 及其 4 个辅助函数（声明/根标签/空元素风格/结尾换行），`save_xml` 写出后调用；新增 4 条单测 |
+| D5 | `src/ioc/generator.rs` 抽出 `timeout_message()`、`generate()` 增加 `timeout_secs` 参数；`src/ioc/mod.rs` 与 `src/main.rs` 增加 `--timeout`；新增 2 条单测 |
+| D7 | `src/output/mod.rs` 去掉 `#[serde(untagged)]`、改为手写 `Serialize` 加 `kind`；新增 3 条单测 |
+| D16 | `src/output/mod.rs` 新增 `Sections` 变体；`human.rs`/`ai.rs` 各加一个渲染分支；`keil/mod.rs` 的 `cmd_map` 与 `locate` 改为一次 `display`；新增 `tests/cli_json_shape.rs` 4 条 CLI 测试 |
+| D13 | `src/keil/editor.rs` 的 `file_add` 增加路径存在性提示（stderr）；新增 2 条 CLI 测试 |
+| — | 文档同步：`README.md`（`-p` 签名、optim/wlevel 示例、JSON 契约表）、`skills/keil-dev/references/{commands,editing}.md`、`docs/TEST_SPEC.md`（JSON 用例与验收清单） |
+
+第二轮回归结果：
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test`（单测） | **89 passed / 0 failed** |
+| `cargo test`（集成，5 个测试二进制） | **20 passed / 0 failed** |
+| `cargo clippy --all-targets` | 仍是那 7 条既有警告，**无新增** |
+| `compare_keil.py` | **42 项 0 失败** |
+| `compare_ioc.py` | **25 项 0 失败**（D7 的常驻探针已消除） |
+| `test_keil_write.py` | **37 项 1 失败**（仅剩 DOM 不保属性顺序这一已知残留） |
+| `verify_map_fix.py` | 三份真实 map 恒等式全过 |
+| D3 端到端 | 真实 1836 行工程净零往返：**1508 → 10 行** |
 
 ### 8.1 P0
 

@@ -431,6 +431,10 @@ enum IocCommands {
         /// Path to STM32CubeMX executable
         #[arg(long)]
         cubemx: Option<String>,
+        /// Seconds to wait for CubeMX. CubeMX `-q` does not dismiss its own
+        /// dialogs, so raise this if you will be answering a dialog by hand.
+        #[arg(long, default_value_t = 120)]
+        timeout: u64,
     },
 }
 

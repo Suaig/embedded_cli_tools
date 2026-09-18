@@ -149,8 +149,30 @@ AI 模式输出示例：
 device.name:STM32H750XBHx
 output.name:signal_project
 output.hex:yes
-ccompiler.optim:4 (O3) [0=default 1=O0 2=O1 3=O2 4=O3 5=Ofast 6=Os 7=Oz 8=Omax]
-ccompiler.wlevel:3 (High) [0=None 1=Low 2=Medium 3=High]
+ccompiler.optim:4 (-O3) [0=<default> 1=-O0 2=-O1 3=-O2 4=-O3 5=-Ofast 6=-Os balanced 7=-Oz image size 8=-Omax]
+ccompiler.wlevel:3 (AC5-like Warnings) [0=<unspecified> 1=No Warnings 2=All Warnings 3=AC5-like Warnings 4=MISRA Compatible]
+```
+
+`--json` 每次调用只输出**一个** JSON 文档，且带 `kind` 判别字段，消费方按一个字段分发即可，不必按命令猜形状：
+
+| kind | 其余字段 | 命令 |
+|---|---|---|
+| `table` | `headers`、`rows` | `keil info`（不指定 target）、`keil groups`、`keil files`、`ioc info`、`serial scan`、`serial daemon list`、`serial daemon history` |
+| `kv` | `entries`（`[key, value]` 数组） | `keil info -t <T>`、`keil config`、`keil build`、`ioc get <前缀>`、`config set` / `unset` |
+| `list` | `items` | `keil defines`、`keil includes` |
+| `message` | `value` | 写类命令的 `"ok"`、`ioc get <精确键>`、`keil locate` 的原文片段、`serial` 的空态提示 |
+| `sections` | `sections`（上面几种的数组） | `keil map`、`keil locate` —— 一条命令要输出两块内容时 |
+
+```bash
+$ emb --json ioc get project.ioc Mcu.Name     # 精确命中 → message
+{ "kind": "message", "value": "STM32H750XBHx" }
+
+$ emb --json ioc get project.ioc GPIO         # 前缀命中 → kv
+{ "kind": "kv", "entries": [["GPIO.groupedBy", "Show All"]] }
+
+$ emb --json keil map Objects/out.map | jq '.sections[] | .kind'
+"kv"
+"table"
 ```
 
 ## 完整命令参考
@@ -176,12 +198,13 @@ emb keil file-add <path> -t <target> -g <group> <filepath> [-p <project>]
 emb keil file-remove <path> -t <target> -g <group> <filename> [-p <project>]
 emb keil file-exclude <path> -t <target> -g <group> <filename> [-p <project>]
 emb keil file-include <path> -t <target> -g <group> <filename> [-p <project>]
-emb keil build <path> [-t <target>]
-emb keil rebuild <path> [-t <target>]
-emb keil clean <path> [-t <target>]
-emb keil flash <path> [-t <target>]
+emb keil build <path> [-t <target>] [-p <project>]
+emb keil rebuild <path> [-t <target>] [-p <project>]
+emb keil clean <path> [-t <target>] [-p <project>]
+emb keil flash <path> [-t <target>] [-p <project>]
 emb keil map <path>                          # 分析 armlink .map（ROM/RW/ZI + 执行区域）
-emb keil locate <path> -t <target> <element> # 定位 XML 节点（返回 start_line + 原始片段）
+emb keil locate <path> -t <target> <element> [-p <project>]
+                                             # 定位 XML 节点（返回 start_line + 原始片段）
                                              # element: defines | includes | Optim | ScatterFile | File | ...
 ```
 

@@ -27,5 +27,6 @@ pub fn render(value: &OutputValue) -> String {
             }
             out
         }
+        OutputValue::Sections(parts) => parts.iter().map(render).collect::<Vec<_>>().join("\n"),
     }
 }

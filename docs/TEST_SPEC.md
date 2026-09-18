@@ -101,8 +101,11 @@ Workspace 子项目映射：
 | UT-OUT-03 | Human List | `OutputValue::List(...)` | 每行一个 |
 | UT-OUT-04 | Human Message | `OutputValue::Message("ok")` | `ok` |
 | UT-OUT-05 | AI Table | 同上 Table | 无边框紧凑 |
-| UT-OUT-06 | JSON Table | 同上 Table | 合法 JSON |
-| UT-OUT-07 | JSON KeyValue | 同上 KeyValue | 合法 JSON |
+| UT-OUT-06 | JSON Table | 同上 Table | 合法 JSON，`kind` = `table`，`headers`/`rows` 在顶层 |
+| UT-OUT-07 | JSON KeyValue | 同上 KeyValue | 合法 JSON，`kind` = `kv`，条目在 `entries` |
+| UT-OUT-08 | JSON List | 同上 List | 合法 JSON，`kind` = `list`，条目在 `items` |
+| UT-OUT-09 | JSON Message | `OutputValue::Message("ok")` | 合法 JSON，`kind` = `message`，值在 `value` |
+| UT-OUT-10 | JSON Sections | 两个子项 | 合法 JSON，`kind` = `sections`，子项在 `sections` |
 
 ---
 
@@ -225,10 +228,13 @@ Workspace 子项目映射：
 
 | 编号 | 命令 | 预期退出码 | 关键验证 |
 |------|------|------------|----------|
-| IT-FMT-01 | `emb --json keil info Test_Project/MDK-ARM/Appli/Test_Appli.uvprojx` | 0 | `jq .` 可解析，`headers`/`rows` 存在 |
-| IT-FMT-02 | `emb --json ioc get Test_Project/Test.ioc Mcu.Name` | 0 | `jq .` 可解析 |
+| IT-FMT-01 | `emb --json keil info Test_Project/MDK-ARM/Appli/Test_Appli.uvprojx` | 0 | `jq .` 可解析，`kind` = `table`，`headers`/`rows` 存在 |
+| IT-FMT-02 | `emb --json ioc get Test_Project/Test.ioc Mcu.Name` | 0 | `jq .` 可解析，`kind` = `message`，`value` 为芯片型号 |
 | IT-FMT-03 | `emb --ai keil config ... ccompiler` | 0 | 每行 `key:value [...或]` 格式 |
 | IT-FMT-04 | `emb keil files ...` | 0 | comfy-table 框线 |
+| IT-FMT-05 | `emb --json keil map <某个 .map>` | 0 | **stdout 整体是一个合法 JSON 文档**（`kind` = `sections`，两段）；`jq` 不报 `Extra data` |
+| IT-FMT-06 | `emb --json keil locate <proj> -t <T> defines` | 0 | **stdout 整体是一个合法 JSON 文档**（`kind` = `sections`，两段） |
+| IT-FMT-07 | `emb --json ioc get Test_Project/Test.ioc GPIO`（前缀命中） | 0 | `kind` = `kv`，与 IT-FMT-02 的 `message` 不同 |
 
 ### 3.11 Workspace 一致性
 
@@ -282,6 +288,6 @@ bash tests/run_tests.sh       # 自动化集成测试全部通过
 - [ ] 自动化集成测试全部 PASS
 - [ ] `emb --help` 输出正确
 - [ ] `--ai` 模式 config 每个 key 后有 `[可选值范围]`
-- [ ] `--json` 输出为合法 JSON
+- [ ] `--json` 每次调用只输出**一个**合法 JSON 文档，且带 `kind` 判别字段（`message`/`kv`/`table`/`list`/`sections`）
 - [ ] Workspace 多项目模式正常
 - [ ] 边界情况报错合理（非 panic）

@@ -611,8 +611,13 @@ pub fn handle(_cli: &Cli, keil: &super::KeilCommands, cfg: &crate::config::EmbCo
                 ("Start Line".into(), snip.start_line.to_string()),
                 ("End Line".into(), snip.end_line.to_string()),
             ];
-            output::display(&OutputValue::KeyValue(pairs), format);
-            output::display(&OutputValue::Message(snip.raw), format);
+            output::display(
+                &OutputValue::Sections(vec![
+                    OutputValue::KeyValue(pairs),
+                    OutputValue::Message(snip.raw),
+                ]),
+                format,
+            );
             Ok(())
         }
     }
@@ -631,8 +636,6 @@ fn cmd_map(info: &map::MapInfo, format: OutputFormat) {
         ("Total RW".into(), human(info.totals.rw_size)),
         ("Total ROM".into(), human(info.totals.rom_size)),
     ];
-    output::display(&OutputValue::KeyValue(pairs), format);
-
     let headers: Vec<String> = vec![
         "Region".into(),
         "Exec Base".into(),
@@ -655,7 +658,14 @@ fn cmd_map(info: &map::MapInfo, format: OutputFormat) {
             ]
         })
         .collect();
-    output::display(&OutputValue::Table { headers, rows }, format);
+
+    output::display(
+        &OutputValue::Sections(vec![
+            OutputValue::KeyValue(pairs),
+            OutputValue::Table { headers, rows },
+        ]),
+        format,
+    );
 }
 
 /// Turn a finished UV4 run into a command outcome.

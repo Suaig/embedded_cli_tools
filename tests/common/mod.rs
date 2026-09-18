@@ -76,6 +76,29 @@ pub fn write_fixture(name: &str) -> PathBuf {
     path
 }
 
+/// Write arbitrary content into this test binary's scratch directory.
+pub fn write_scratch(name: &str, contents: &str) -> PathBuf {
+    let path = scratch_dir().join(name);
+    std::fs::write(&path, contents).unwrap();
+    path
+}
+
+/// Write a minimal armlink map: entry point, Grand Totals, the three published
+/// totals, and one execution region.
+pub fn write_map_fixture(name: &str) -> PathBuf {
+    write_scratch(
+        name,
+        "\
+  Image Entry point : 0x08000000
+    40828       4176       5408         40      14860     415344   Grand Totals
+    Total RO  Size (Code + RO Data)                46236 (  45.15kB)
+    Total RW  Size (RW Data + ZI Data)             14900 (  14.55kB)
+    Total ROM Size (Code + RO Data + RW Data)      46276 (  45.19kB)
+    Execution Region ER_IROM1 (Exec base: 0x08000000, Load base: 0x08000000, Size: 0x0000b49c, Max: 0x00100000, ABSOLUTE)
+",
+    )
+}
+
 /// Write a two-project workspace and return the `.uvmpw` path.
 ///
 /// The sub-projects have different target names and different defines, so a

@@ -87,3 +87,44 @@ fn daemon_read_and_history_reject_an_unknown_id() {
         );
     }
 }
+
+/// Adding a file that does not exist on disk is legitimate — Keil lets you
+/// register a source before creating it — so this stays exit 0. But it has to
+/// say so, otherwise an agent believes it got the path right.
+#[test]
+fn file_add_warns_about_a_path_that_does_not_exist_yet() {
+    let proj = write_fixture("file_add_ghost.uvprojx");
+    let out = emb(&[
+        "keil", "file-add", proj.to_str().unwrap(), "-t", "OnlyTarget",
+        "-g", "Application", "..\\ghost.c",
+    ]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        out.status.success(),
+        "a missing file is a warning, not an error: {stderr}"
+    );
+    assert!(
+        stderr.contains("ghost.c"),
+        "warning should name the path, got: {stderr}"
+    );
+}
+
+#[test]
+fn file_add_is_quiet_when_the_path_exists() {
+    let proj = write_fixture("file_add_real.uvprojx");
+    let real = proj.parent().unwrap().join("real_source.c");
+    std::fs::write(&real, "int main(void) { return 0; }\n").unwrap();
+
+    let out = emb(&[
+        "keil", "file-add", proj.to_str().unwrap(), "-t", "OnlyTarget",
+        "-g", "Application", "real_source.c",
+    ]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        !stderr.contains("warning"),
+        "an existing file must not warn, got: {stderr}"
+    );
+}

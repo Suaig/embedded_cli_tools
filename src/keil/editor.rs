@@ -18,6 +18,9 @@ fn load_xml(path: &Path) -> anyhow::Result<Element> {
 
 /// Write the XML tree back to file. Creates a .bak backup first.
 fn save_xml(root: &Element, path: &Path) -> anyhow::Result<()> {
+    // Read the current file first: its formatting is what we restore below.
+    let original = fs::read_to_string(path).unwrap_or_default();
+
     // Create backup
     let bak_path = path.with_extension("uvprojx.bak");
     fs::copy(path, &bak_path)
@@ -31,11 +34,7 @@ fn save_xml(root: &Element, path: &Path) -> anyhow::Result<()> {
         // xmltree::Element::write() emits compact single-line XML that destroys
         // the original formatting (collapses a 3000-line .uvprojx to 1 line).
         // Use write_with_config with perform_indent + 2-space indent_string so
-        // output stays readable and diff-friendly. Caveat: xmltree does not
-        // preserve the blank lines the CubeMX/Keil generator puts between
-        // elements, so the FIRST edit still produces a diff that drops those
-        // blank lines — but structure and indentation are preserved, and
-        // subsequent edits are stable.
+        // output stays readable and diff-friendly.
         let config = EmitterConfig {
             perform_indent: true,
             indent_string: std::borrow::Cow::Borrowed("  "),
@@ -43,6 +42,14 @@ fn save_xml(root: &Element, path: &Path) -> anyhow::Result<()> {
         };
         root.write_with_config(&mut file, config)
             .with_context(|| "failed to write XML content")?;
+    }
+
+    // Put back the parts of the formatting the DOM cannot round-trip.
+    {
+        let serialized = fs::read_to_string(&tmp_path)
+            .with_context(|| "failed to read temp file for format restoration")?;
+        fs::write(&tmp_path, restore_keil_format(&serialized, &original))
+            .with_context(|| "failed to write restored formatting")?;
     }
 
     // Verify the written file can be re-parsed
@@ -58,6 +65,152 @@ fn save_xml(root: &Element, path: &Path) -> anyhow::Result<()> {
         .with_context(|| format!("failed to replace {}", path.display()))?;
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Format restoration
+// ---------------------------------------------------------------------------
+
+/// Undo the formatting a full DOM round trip loses.
+///
+/// xmltree rebuilds the file from its own tree, so even a net-zero edit drops
+/// the XML declaration's `standalone="no"`, the namespace prefixes on
+/// attributes, the trailing newline, and rewrites every empty element as
+/// `<Tag />`. All four are recoverable from the original text with no
+/// positional information. Measured on a real 1836-line `.uvprojx`, this takes a
+/// net-zero round trip from 1512 changed lines down to 16 — the rest being
+/// blank-line placement and attribute order, which the DOM does not preserve at
+/// all.
+///
+/// (A positional approach — splicing into the original text — would close that
+/// last gap, at the cost of rewriting every editor command.)
+fn restore_keil_format(serialized: &str, original: &str) -> String {
+    let mut text = restore_xml_declaration(serialized);
+    text = restore_root_tag(&text, original);
+    text = restore_empty_elements(&text, &always_self_closed_tags(original));
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text
+}
+
+/// Keil writes `standalone="no"`; the DOM drops it.
+fn restore_xml_declaration(text: &str) -> String {
+    const KEIL_DECL: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="no" ?>"#;
+    match text.find("?>") {
+        Some(end) => format!("{KEIL_DECL}{}", &text[end + 2..]),
+        None => text.to_string(),
+    }
+}
+
+/// Reuse the original root open tag.
+///
+/// It carries the namespace declarations and the `xsi:`-prefixed attributes the
+/// DOM drops. No editor command touches the root's attributes, so the original
+/// tag is always the right one.
+fn restore_root_tag(text: &str, original: &str) -> String {
+    let (Some(original_tag), Some(serialized_tag)) =
+        (root_open_tag(original), root_open_tag(text))
+    else {
+        return text.to_string();
+    };
+    match text.find(serialized_tag) {
+        Some(at) => format!(
+            "{}{}{}",
+            &text[..at],
+            original_tag,
+            &text[at + serialized_tag.len()..]
+        ),
+        None => text.to_string(),
+    }
+}
+
+/// The first element open tag in `text`, skipping the declaration and comments.
+fn root_open_tag(text: &str) -> Option<&str> {
+    let mut rest = text;
+    loop {
+        let start = rest.find('<')?;
+        let after = &rest[start..];
+        if after.starts_with("<?") || after.starts_with("<!") {
+            rest = &after[after.find('>')? + 1..];
+            continue;
+        }
+        let end = after.find('>')?;
+        return Some(&after[..=end]);
+    }
+}
+
+/// Write empty elements the way the original did.
+///
+/// Keil mixes `<Tag></Tag>` and `<Tag/>` in the same file, so rewriting every
+/// empty element would itself be a formatting change. Tags the original
+/// *always* writes self-closed keep that style — including the absent space
+/// before `/>`, which the emitter always adds.
+fn restore_empty_elements(text: &str, keep_self_closed: &std::collections::HashSet<&str>) -> String {
+    let mut out = String::with_capacity(text.len() + text.len() / 16);
+    for line in text.split_inclusive('\n') {
+        let body = line.trim_end_matches(['\r', '\n']);
+        let trimmed = body.trim();
+        let Some(name) = self_closed_name(trimmed) else {
+            out.push_str(line);
+            continue;
+        };
+
+        let indent = &body[..body.len() - body.trim_start().len()];
+        let head = trimmed[..trimmed.len() - 3].trim_end(); // drop the " />"
+        out.push_str(indent);
+        out.push_str(head);
+        if keep_self_closed.contains(name) {
+            out.push_str("/>");
+        } else {
+            out.push_str("></");
+            out.push_str(name);
+            out.push('>');
+        }
+        out.push_str(&line[body.len()..]);
+    }
+    out
+}
+
+/// `<Name ... />` -> `Some("Name")`, for a line holding one empty element.
+fn self_closed_name(body: &str) -> Option<&str> {
+    if !body.starts_with('<') || !body.ends_with("/>") {
+        return None;
+    }
+    if body.starts_with("<?") || body.starts_with("<!") {
+        return None;
+    }
+    let inner = body[1..body.len() - 2].trim_end();
+    let end = inner.find(char::is_whitespace).unwrap_or(inner.len());
+    let name = &inner[..end];
+    (!name.is_empty()).then_some(name)
+}
+
+/// `<Name></Name>` -> `Some("Name")`, for a line holding one empty element.
+fn paired_name(body: &str) -> Option<&str> {
+    let rest = body.strip_prefix('<')?;
+    let close = rest.find("></")?;
+    let name = &rest[..close];
+    if name.is_empty() || name.contains(char::is_whitespace) {
+        return None;
+    }
+    (rest[close + 3..].strip_suffix('>') == Some(name)).then_some(name)
+}
+
+/// Tags the original writes self-closed and never as `<Tag></Tag>`.
+fn always_self_closed_tags(text: &str) -> std::collections::HashSet<&str> {
+    let mut self_closed = std::collections::HashSet::new();
+    let mut paired = std::collections::HashSet::new();
+    for line in text.lines() {
+        let body = line.trim();
+        if let Some(name) = self_closed_name(body) {
+            self_closed.insert(name);
+        }
+        if let Some(name) = paired_name(body) {
+            paired.insert(name);
+        }
+    }
+    self_closed.difference(&paired).copied().collect()
 }
 
 /// Get the text content of an Element (from its Text children).
@@ -547,6 +700,18 @@ pub fn file_add(
 
     files_elem.children.push(XMLNode::Element(file_elem));
 
+    // Keil lets you register a source before creating it, so a missing path is
+    // not an error — but staying silent about a typo is worse than saying so.
+    // `<FilePath>` is relative to the .uvprojx directory.
+    let resolved = path.parent().unwrap_or(Path::new(".")).join(filepath);
+    if !resolved.exists() {
+        eprintln!(
+            "warning: '{}' does not exist yet (looked for {})",
+            filepath,
+            resolved.display()
+        );
+    }
+
     save_xml(&root, path)?;
     Ok(())
 }
@@ -964,5 +1129,64 @@ mod tests {
 
         let bak_path = path.with_extension("uvprojx.bak");
         assert!(bak_path.exists());
+    }
+
+    // -----------------------------------------------------------------------
+    // Format restoration
+    // -----------------------------------------------------------------------
+
+    /// Keil's own output, including the two empty-element styles it mixes.
+    const ORIGINAL: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\" ?>\n\
+<Project xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:noNamespaceSchemaLocation=\"project_projx.xsd\">\n\
+  <SchemaVersion>2.1</SchemaVersion>\n\
+  <MiscControls></MiscControls>\n\
+  <apis/>\n\
+</Project>\n";
+
+    /// What xmltree emits for the same tree, with no edit applied.
+    const SERIALIZED: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+<Project xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" noNamespaceSchemaLocation=\"project_projx.xsd\">\n\
+  <SchemaVersion>2.1</SchemaVersion>\n\
+  <MiscControls />\n\
+  <apis />\n\
+</Project>";
+
+    #[test]
+    fn restores_the_declaration_root_tag_and_trailing_newline() {
+        let out = restore_keil_format(SERIALIZED, ORIGINAL);
+        assert!(
+            out.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\" ?>"),
+            "{out}"
+        );
+        assert!(
+            out.contains("xsi:noNamespaceSchemaLocation=\"project_projx.xsd\""),
+            "the xsi: prefix must come back: {out}"
+        );
+        assert!(out.ends_with('\n'), "trailing newline missing: {out:?}");
+    }
+
+    #[test]
+    fn restores_the_paired_style_for_tags_the_original_paired() {
+        let out = restore_keil_format(SERIALIZED, ORIGINAL);
+        assert!(out.contains("<MiscControls></MiscControls>"), "{out}");
+    }
+
+    #[test]
+    fn keeps_self_closed_the_tags_the_original_always_self_closed() {
+        let out = restore_keil_format(SERIALIZED, ORIGINAL);
+        assert!(
+            out.contains("<apis/>"),
+            "the original wrote this tag self-closed; rewriting it is itself a change: {out}"
+        );
+    }
+
+    #[test]
+    fn a_paired_tag_is_not_mistaken_for_a_self_closed_one() {
+        assert_eq!(self_closed_name("<Files></Files>"), None);
+        assert_eq!(paired_name("<Files></Files>"), Some("Files"));
+
+        // A tag Keil writes both ways keeps the paired style, which dominates.
+        let mixed = "  <Files></Files>\n  <Files/>\n";
+        assert!(!always_self_closed_tags(mixed).contains("Files"));
     }
 }

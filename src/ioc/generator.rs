@@ -8,7 +8,11 @@ use std::time::{Duration, Instant};
 /// CubeMX `-q` flag requires a script file (not the IOC path directly).
 /// STM32CubeMX.exe is a launcher that spawns a JVM and returns immediately,
 /// so we must wait for the actual generation to complete by polling the output.
-pub fn generate(path: &Path, cubemx_path: Option<&Path>) -> anyhow::Result<()> {
+pub fn generate(
+    path: &Path,
+    cubemx_path: Option<&Path>,
+    timeout_secs: u64,
+) -> anyhow::Result<()> {
     // Checked before launching anything: CubeMX is a heavyweight JVM, and
     // handed a missing .ioc it dies with a NullPointerException only after the
     // full timeout has elapsed.
@@ -65,7 +69,7 @@ pub fn generate(path: &Path, cubemx_path: Option<&Path>) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to execute STM32CubeMX: {e}"))?;
 
     // Wait for .uvprojx to appear AND be fully written (CubeMX JVM generates it)
-    let timeout = Duration::from_secs(120);
+    let timeout = Duration::from_secs(timeout_secs);
     let start = Instant::now();
     let mut found = false;
 
@@ -96,32 +100,42 @@ pub fn generate(path: &Path, cubemx_path: Option<&Path>) -> anyhow::Result<()> {
     let _ = fs::remove_file(&script_path);
 
     if !found {
-        let hint = if lingering.is_empty() {
-            "No CubeMX process is still running for this invocation.".to_string()
-        } else {
-            let pids: Vec<String> = lingering.iter().map(u32::to_string).collect();
-            format!(
-                "CubeMX is still running as PID {} — answer its dialog and re-run, \
-                 or stop it with `taskkill {}`.",
-                pids.join(", "),
-                pids.iter()
-                    .map(|p| format!("/PID {p} /F"))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            )
-        };
-        anyhow::bail!(
-            "STM32CubeMX generation timed out after {}s. \
-             If CubeMX opened a confirmation dialog, it is waiting for you to answer it — \
-             `-q` script mode does not dismiss it. {hint} Otherwise check ~/.stm32cubemx/STM32CubeMX.log.",
-            timeout.as_secs()
-        );
+        anyhow::bail!("{}", timeout_message(timeout.as_secs(), &lingering));
     }
 
     // Fix CubeMX path bugs in generated .uvprojx
     fix_cubemx_path_bugs(project_dir, &project_name);
 
     Ok(())
+}
+
+/// What to tell the user when CubeMX produced nothing within the deadline.
+///
+/// A live process means "still waiting on a dialog", not "failed": CubeMX's `-q`
+/// script mode does not dismiss its own confirmation dialogs, so the run cannot
+/// finish until a human answers. Only the caller can decide what to do about
+/// that, so the message says what is actually happening and what the options
+/// are, rather than declaring a failure.
+fn timeout_message(timeout_secs: u64, lingering_pids: &[u32]) -> String {
+    if lingering_pids.is_empty() {
+        return format!(
+            "STM32CubeMX produced nothing within {timeout_secs}s and is no longer running. \
+             Check ~/.stm32cubemx/STM32CubeMX.log for what it did."
+        );
+    }
+
+    let pids: Vec<String> = lingering_pids.iter().map(u32::to_string).collect();
+    format!(
+        "STM32CubeMX is still running (PID {}) after {timeout_secs}s, most likely showing a \
+         confirmation dialog: `-q` script mode does not dismiss it, so only a human (or an \
+         agent driving the GUI) can. Answer it and re-run, raise `--timeout <seconds>`, or \
+         stop it with `taskkill {}`.",
+        pids.join(", "),
+        pids.iter()
+            .map(|p| format!("/PID {p} /F"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
 }
 
 /// The directory to run the CubeMX launcher in.
@@ -354,5 +368,28 @@ mod tests {
         let cmd = find_cubemx_pids_command(script);
         assert!(cmd.contains(r"C:\Temp\emb_cubemx_Fan_9f3c1a.txt"), "{cmd}");
         assert!(cmd.contains("ProcessId"), "{cmd}");
+    }
+
+    /// Reporting "timed out" while CubeMX is merely waiting on a human dialog
+    /// sends the user hunting for a bug that does not exist.
+    #[test]
+    fn a_live_cubemx_process_is_reported_as_waiting() {
+        let msg = timeout_message(120, &[4242]);
+        assert!(msg.contains("4242"), "{msg}");
+        assert!(
+            msg.contains("--timeout"),
+            "should suggest raising the deadline: {msg}"
+        );
+        assert!(msg.contains("taskkill"), "should say how to stop it: {msg}");
+    }
+
+    #[test]
+    fn a_dead_cubemx_process_points_at_its_log() {
+        let msg = timeout_message(120, &[]);
+        assert!(msg.contains("STM32CubeMX.log"), "{msg}");
+        assert!(
+            !msg.contains("taskkill"),
+            "nothing left to stop: {msg}"
+        );
     }
 }

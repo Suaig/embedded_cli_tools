@@ -32,5 +32,15 @@ pub fn render(value: &OutputValue) -> String {
             }
             out
         }
+        OutputValue::Sections(parts) => render_sections(parts),
     }
+}
+
+/// Parts of one command's output, separated by a blank line.
+///
+/// Every part already ends in a newline, so joining on "\n" reproduces exactly
+/// what two consecutive `display()` calls used to print.
+fn render_sections(parts: &[OutputValue]) -> String {
+    let rendered: Vec<String> = parts.iter().map(render).collect();
+    rendered.join("\n")
 }

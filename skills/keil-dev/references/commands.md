@@ -2,6 +2,8 @@
 
 `<proj>` = `.uvprojx` 路径；`<T>` = target 名（多 target 必填，单 target 可省）。全局选项 `--ai`（紧凑）/ `--json`。
 
+`.uvmpw` 工作区：所有**接受工程路径**的 keil 子命令都接受 `-p <project>`（子项目文件名如 `Boot.uvprojx`，或 `.\Boot\Boot.uvprojx` 完整相对路径）；不带 `-p` 时取工作区里的**第一个**子项目。（`emb keil map` 例外——它接收的是 `.map` 文件，与工作区无关。）
+
 ## 查看（只读）
 
 | 命令 | 用途 |
@@ -13,6 +15,10 @@
 | `emb keil groups   <proj> -t <T>` | 源文件分组 |
 | `emb keil files    <proj> -t <T> [-g GROUP]` | 文件列表（可按 group 过滤） |
 
+上表均可加 `[-p <project>]`。
+
+`config` 的 `category` 只接受顶层分类（`device`/`output`/`ccompiler`/`asm`/`linker`/`memory`），**不接受具体键**（`ccompiler.optim` 会报错并列出可选分类）。`config <category>` 与 `files -g <group>` 在无匹配时返回非零退出码，不会静默给空结果。
+
 ## 定位（省 token，见 editing.md）
 
 ```
@@ -20,6 +26,8 @@ emb keil locate <proj> -t <T> defines       # 宏节点（start_line + raw）
 emb keil locate <proj> -t <T> ScatterFile   # 任意配置标签
 emb keil locate <proj> -t <T> File          # 多行元素（start_line + end_line）
 ```
+
+可加 `[-p <project>]`。`locate` 是**只读**的，返回行号供 Read + Edit 使用，不会重写 XML。
 
 ## 修改工程（editor 快速模式，见 editing.md 的格式警告）
 
@@ -41,12 +49,16 @@ emb keil config-set      <proj> -t <T> key value
 ## 构建 / 烧录
 
 ```
-emb keil build   <proj> [-t <T>]    # 增量
-emb keil rebuild <proj> [-t <T>]    # 全量重编译
-emb keil clean   <proj> [-t <T>]
-emb keil flash   <proj> [-t <T>]    # Flash Download
+emb keil build   <proj> [-t <T>] [-p <project>]    # 增量
+emb keil rebuild <proj> [-t <T>] [-p <project>]    # 全量重编译
+emb keil clean   <proj> [-t <T>] [-p <project>]
+emb keil flash   <proj> [-t <T>] [-p <project>]    # Flash Download
 ```
 返回 success / errors / warnings / program_size(Code/RO/RW/ZI) / output_file。UV4 码：0=成功，1=警告，2+=错误。
+
+**失败会返回非零退出码**，stderr 带错误/警告计数与 UV4 日志末尾几行。target 名写错会在调用 UV4 **之前**就被拒掉并列出可用 target，不会白跑一轮编译。
+
+`.uvmpw` 下不带 `-p` 只会构建工作区第一个子项目；要构建别的子项目必须显式 `-p`。
 
 ## map 分析
 

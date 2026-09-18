@@ -12,7 +12,7 @@ pub fn handle(ioc: &super::IocCommands, cfg: &crate::config::EmbConfig, format: 
         super::IocCommands::Get { path, prefix } => cmd_get(path, prefix, format),
         super::IocCommands::Set { path, key, value } => cmd_set(path, key, value, format),
         super::IocCommands::Rm { path, key } => cmd_rm(path, key, format),
-        super::IocCommands::Generate { path, cubemx } => cmd_generate(path, cubemx, cfg, format),
+        super::IocCommands::Generate { path, cubemx, timeout } => cmd_generate(path, cubemx, *timeout, cfg, format),
     }
 }
 
@@ -82,10 +82,10 @@ fn cmd_rm(path: &str, key: &str, format: OutputFormat) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_generate(path: &str, cubemx: &Option<String>, cfg: &crate::config::EmbConfig, format: OutputFormat) -> anyhow::Result<()> {
+fn cmd_generate(path: &str, cubemx: &Option<String>, timeout: u64, cfg: &crate::config::EmbConfig, format: OutputFormat) -> anyhow::Result<()> {
     let explicit = cubemx.as_deref().map(Path::new);
     let resolved = crate::config::resolve_cubemx(cfg, explicit)?;
-    generator::generate(Path::new(path), Some(&resolved))?;
+    generator::generate(Path::new(path), Some(&resolved), timeout)?;
     let value = OutputValue::Message("ok".to_string());
     output::display(&value, format);
     Ok(())
