@@ -4,7 +4,7 @@ pub fn decode_hex(hex: &str) -> anyhow::Result<Vec<u8>> {
     if hex.is_empty() {
         return Ok(Vec::new());
     }
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         anyhow::bail!("hex string must have even length, got {}", hex.len());
     }
     (0..hex.len())

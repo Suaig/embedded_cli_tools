@@ -325,7 +325,8 @@ emb/
 ├── skills/
 │   └── keil-dev/            # Claude Code Skill（SKILL.md + references/）
 └── docs/
-    └── TEST_SPEC.md         # 测试验收规范
+    └── plan/
+        └── 测试验收_规格.md  # 测试验收规范
 ```
 
 ## 技术栈

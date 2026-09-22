@@ -53,6 +53,16 @@ emb debug keil <proj> -t <T> --ini my_debug.ini
 ```
 自定义 .ini **必须含自己的 EXIT**，否则 UV4 卡住靠 timeout。可用的 Keil 调试命令：`RESET` / `G [addr]` / `BS addr` / `BC n` / `Tstep` / `Pstep` / `DISPLAY start,end` / `printf(..., _RDWORD(addr))` / `LOG > file` / `LOG OFF` / `EXIT`。
 
+## 输出与排障
+
+输出最多三段，**`--json` 下是一个合法 JSON 文档**（`kind: "sections"`），不是多段拼接：
+
+1. `Target` / `Exit Code` / `Timed Out` —— 每次都输出
+2. 过滤掉命令回显后的 dump 内容 —— 有内容时输出
+3. **UV4 自身日志的末尾 20 行** —— 仅在 `Timed Out: yes` 或 `Exit Code != 0` 时输出
+
+第 3 段是排障入口：`.ini` 的 dump 只记录调试命令的输出，而「连不上调试器」「target 不存在」「license 报错」这类问题只出现在 UV4 自己的日志里。该日志写在临时目录、命令结束即删，所以出问题时直接把尾部带出来。仍不够用时，用 `--ini` 换自定义脚本并自行 `LOG >` 到固定路径。
+
 ## 选项
 
 - `--timeout 60`  UV4 -d 超时秒数（默认 60）。超时返回 exit 124。

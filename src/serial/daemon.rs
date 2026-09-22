@@ -272,7 +272,7 @@ pub fn read(id: &str) -> anyhow::Result<Vec<u8>> {
 
     // Clear the buffer so next read only gets new data
     if !data.is_empty() {
-        fs::write(&buf_path, &[])?;
+        fs::write(&buf_path, [])?;
     }
 
     Ok(data)
@@ -308,7 +308,7 @@ pub fn history_clear(id: &str) -> anyhow::Result<()> {
 
     let hist_path = history_path(id);
     if hist_path.exists() {
-        fs::write(&hist_path, &[])?;
+        fs::write(&hist_path, [])?;
     }
     Ok(())
 }

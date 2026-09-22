@@ -1,6 +1,6 @@
 # emb 工具对 Fan_simulator_mdk 工程的实测报告
 > 用真实 STM32H7RS 双工程 Keil workspace 验证 `emb` 的解析正确性、功能完整性与健壮性，并给出缺陷清单。
-**更新**: 2026-09-18 · **关联**: `src/keil/*`、`src/ioc/*`、`src/serial/*`、`tests/*.rs`、`docs/TEST_SPEC.md` · **状态**: 定稿
+**更新**: 2026-09-18 · **关联**: `src/keil/*`、`src/ioc/*`、`src/serial/*`、`tests/*.rs`、`docs/plan/测试验收_规格.md` · **状态**: 定稿
 
 ---
 
@@ -197,7 +197,7 @@ P0 与 P1 共 5 项（D1、D2、D4、D11 及 D5 的 3 个子项）已于同日�
   | `list` | `items` |
   | `sections` | `sections`（见 D16） |
 
-  之所以手写而不是用 `#[serde(tag = ...)]`：internally-tagged 不支持 newtype 变体（`Message(String)`），adjacently-tagged（`tag` + `content`）又会把 `headers`/`rows` 推进 `content` 里，破坏 README 与 `TEST_SPEC` 已记录的表格形状。手写既保住了顶层字段，也不用改任何一处调用点。
+  之所以手写而不是用 `#[serde(tag = ...)]`：internally-tagged 不支持 newtype 变体（`Message(String)`），adjacently-tagged（`tag` + `content`）又会把 `headers`/`rows` 推进 `content` 里，破坏 README 与 `docs/plan/测试验收_规格.md` 已记录的表格形状。手写既保住了顶层字段，也不用改任何一处调用点。
 - **验证**（2026-09-18）：新增 `tests/cli_json_shape.rs` 4 条 CLI 测试；`src/output/mod.rs` 新增 3 条单测（四种 kind、表格顶层字段、`ioc get` 两种形状可区分）。实测：
 
   ```
@@ -207,7 +207,7 @@ P0 与 P1 共 5 项（D1、D2、D4、D11 及 D5 的 3 个子项）已于同日�
   { "kind": "kv", "entries": [["GPIO.groupedBy", "Show All"]] }
   ```
 
-  `compare_ioc.py` 的常驻探针由"长期 1 失败"变为 **25 项 0 失败**。`docs/TEST_SPEC.md` 的 IT-FMT-01/02 断言的是"合法 JSON""`headers`/`rows` 存在"，仍然成立（表格形状未变）。
+  `compare_ioc.py` 的常驻探针由"长期 1 失败"变为 **25 项 0 失败**。`docs/plan/测试验收_规格.md` 的 IT-FMT-01/02 断言的是"合法 JSON""`headers`/`rows` 存在"，仍然成立（表格形状未变）。
 
 ### D8 [中] 过滤条件无匹配时静默成功 —— 已修复
 
@@ -270,6 +270,7 @@ P0 与 P1 共 5 项（D1、D2、D4、D11 及 D5 的 3 个子项）已于同日�
 
   最终映射：`0=<unspecified>` `1=No Warnings` `2=All Warnings` `3=AC5-like Warnings` `4=MISRA Compatible`。
 - **解决方案**：`wlevel_str()` 改为接收 `ac6` 参数（与既有 `optim_str()` 同形），AC6 分支使用上述已核实列表。**AC5 分支的标签（None/Low/Medium/High）未获任何证据，故原样保留并在代码注释中标注"未核实"**，不臆改。
+- **AC5 分支更正（2026-09-22）**：用户提供 AC5 的 Warnings 下拉截图，只有 **3 项** —— `<unspecified>` / `No Warnings` / `All Warnings`，与 AC6 前 3 项同名同序。可确认是 AC5 页而非 AC6 页的依据：该页下方带 `C99 Mode` 复选框，AC6 页无此项；且列表在 `All Warnings` 后即结束，没有 AC6 的第 4、5 项。原 `None/Low/Medium/High` 纯属臆测，已改为 `0=<unspecified> 1=No Warnings 2=All Warnings`，并补 1 条单测。副作用：AC5 工程若出现 `wLevel ≥ 3`，现在显示 `3 (?)` —— 这正是"读到越界值就照实报"的预期行为，而非静默错标。
 - **顺带对齐**：按用户要求把 AC6 的 Optimization 标签改成 GUI 原文 —— `0 (<default>)`、`6 (-Os balanced)`、`7 (-Oz image size)`，取值范围串同步为 `[0=<default> 1=-O0 … 8=-Omax]`。原为 `default`/`Os`/`Oz`。
 - **验证**（2026-09-18）：真实工程三处全部正确 ——
   | Target | wLevel | 输出 |
@@ -318,13 +319,13 @@ P0 与 P1 共 5 项（D1、D2、D4、D11 及 D5 的 3 个子项）已于同日�
 - **根因**：脚本开头是 `set -euo pipefail`，而 `run_test` 之外的临时 `out=$(...)` 捕获有 **16 处**没有 `|| true`（`run_test` 里的那处用了 `|| exit_code=$?`，是对的）。emb 返回非零时命令替换的退出码触发 `set -e`，脚本在该点直接退出，后续用例与末尾的 PASS/FAIL 汇总都不执行 —— **任何一条用例失败都可能让整个测试套件静默截断**。
 - **解决方案**：
   1. 16 处捕获全部补 `|| true`。**没有**直接去掉 `set -e`：脚本用 `cp`/`mv` 做测试文件的备份还原，`-e` 能在备份失败时立刻停手，避免改坏没有备份的原始文件。
-  2. 新增 `check_test_data()`，在 `check_binary` 之后立刻检查 4 个测试文件是否齐备，缺哪个列哪个，并指向 `docs/TEST_SPEC.md`。
-  3. `docs/TEST_SPEC.md` 补上 "准备测试数据" 一节（此前只在文档里描述了文件清单，没说这些文件不入库、从哪来）。
+  2. 新增 `check_test_data()`，在 `check_binary` 之后立刻检查 4 个测试文件是否齐备，缺哪个列哪个，并指向 `docs/plan/测试验收_规格.md`。
+  3. `docs/plan/测试验收_规格.md` 补上 "准备测试数据" 一节（此前只在文档里描述了文件清单，没说这些文件不入库、从哪来）。
 - **验证**（2026-09-18）：
   - 用等价的失败命令替换做定点验证：`out=$( (exit 1) | tr -d '\r' )` 在 `set -euo pipefail` 下确实中止（exit 1），加 `|| true` 后正常继续（exit 0）。
   - 实际运行 `bash tests/run_tests.sh`：现在在开头立即报出缺失的 3 个文件并提示准备方法（exit 1），不再跑到中途静默死掉。`Test.ioc` 已在库中，正确地未被列为缺失。
 
-### D16 [中] `--json` 有两条命令会连续打印两个 JSON 文档 —— 已修复
+### D16 [中] `--json` 有三条命令会连续打印两个 JSON 文档 —— 已修复
 
 > 实现 D7 方案 B 时发现的同族问题。
 
@@ -335,10 +336,20 @@ P0 与 P1 共 5 项（D1、D2、D4、D11 及 D5 的 3 个子项）已于同日�
   parse error: Extra data: line 38 column 1 (char 482)
   ```
 
-  `emb --json keil locate <proj> -t <T> <el>` 同样（`kv` 段 + 原文片段段）。根因：`cmd_map` 与 `Locate` 分支各调了两次 `output::display()`，而 `display` 每次输出一个完整文档。
+  `emb --json keil locate <proj> -t <T> <el>` 同样（`kv` 段 + 原文片段段）。**同族的第三处是 `emb --json debug keil <proj> -t <T>`**，修 `keil map`/`locate` 时漏掉，2026-09-22 补修。三处根因相同：`cmd_map` / `Locate` / `debug::handle` 各调了两次 `output::display()`，而 `display` 每次输出一个完整文档。
 - **影响**：`--json` 的全部价值是能被 `jq` / 脚本直接消费，这两条命令直接违背该契约；`--ai` / human 模式不受影响（本来就是两段文本）。
-- **解决方案**：新增 `OutputValue::Sections(Vec<OutputValue>)` —— JSON 下合成单个 `{"kind":"sections","sections":[…]}`，human/AI 下逐段渲染并用空行分隔，**外观与原来的两次 `display()` 完全一致**。`keil map` 与 `keil locate` 改为一次 `display`。
+- **解决方案**：新增 `OutputValue::Sections(Vec<OutputValue>)` —— JSON 下合成单个 `{"kind":"sections","sections":[…]}`，human/AI 下逐段渲染并用空行分隔，**外观与原来的两次 `display()` 完全一致**。`keil map` 与 `keil locate` 改为一次 `display`；`debug keil` 于 2026-09-22 同步改为一次 `display`，并顺带接上 `DebugResult.uv4_log`（见 D17）。
 - **验证**（2026-09-18）：新增 `tests/cli_json_shape.rs` 4 条 CLI 测试 —— `keil map` / `keil locate` 的 stdout 必须能被 `serde_json::from_str` 一次解析、且段数与 `kind` 正确；`ioc get` 精确/前缀两种命中的 `kind` 必须不同；`keil info` 的表格必须保持 `headers`/`rows` 在顶层。实测 `emb --json keil map out.map | jq` 现在可用；human 模式输出逐字节未变。
+
+### D17 [低] `DebugResult.uv4_log` 被填充但从未被读取 —— 已修复（2026-09-22）
+
+> 清理 clippy 警告时发现。定级"低"是因为不影响任何已有输出；但它的实际价值在超时场景，见下。
+
+- **问题表象**：`cargo clippy` 报 `field 'uv4_log' is never read`（`src/debug/keil_debug.rs`）。
+- **根因**：`run()` 把 UV4 `-o <log>` 的内容读进 `DebugResult`，但 `debug::handle` 只用了 `exit_code` / `timed_out` / `dump`，日志被丢弃。
+- **为什么不该直接删字段**：UV4 自身的日志记录的是"UV4 进程做了什么"——连不上调试器、target 不存在、license 问题等；而 `dump` 是 `.ini` 调试命令的输出（内存、寄存器），两者互补。`UV4 -d` 超时且 `dump` 为空时，这条日志往往是唯一线索。与 D5 同一条设计原则：**卡住时要说清楚卡在哪，而不是只报一个"超时"**。另外日志写在 `tempfile::tempdir()` 里，`run()` 返回时即被删除，不留在 `DebugResult` 里就彻底丢了。
+- **解决方案**：新增 `keil_debug::log_tail()`，返回日志最后 20 行非空内容（`Option<String>`，日志为空时 `None`）。`debug::handle` 仅在 **`timed_out` 或 `exit_code != 0`** 时把它作为第三个 `Sections` 段输出，正常退出时输出与改动前完全一致。
+- **验证**（2026-09-22）：新增 3 条单测覆盖 `log_tail`（空日志返回 `None`、短日志整段保留、长日志从头截断且不切断行）。`cargo test` 93 单测全过。
 
 ## 6. 未覆盖范围
 
@@ -360,10 +371,10 @@ P0 与 P1 共 5 项（D1、D2、D4、D11 及 D5 的 3 个子项）已于同日�
 | P0 | D2 `keil map` 列错位 | **已修复** | 输出错误数据且与自身 `build` 命令矛盾 |
 | P1 | D4 路径自动探测 | **已修复** | 首次使用即受阻 |
 | P1 | D5 `ioc generate` 输入校验 / 路径 / 超时提示 | **部分修复** | 弹窗等待属 CubeMX 限制；完成判定路径待复测 |
-| P1 | D11 `wLevel` 映射表 | **已修复** | 整表对 AC6 失效 |
+| P1 | D11 `wLevel` 映射表 | **已修复** | 整表对 AC6 失效；AC5 分支曾为臆测，已于 2026-09-22 按截图更正 |
 | P1 | D3 XML 格式破坏 | **已修复** | 序列化后格式化补丁，净零往返 1508 → 10 行 |
 | P2 | D7 JSON 输出形状 | **已修复**（方案 B：`kind` 判别字段） | KeyValue/List/Message 的包裹是已接受的破坏性变更 |
-| P2 | D16 `--json` 输出多个文档 | **已修复** | `keil map` / `keil locate` 的 stdout 整体不是合法 JSON |
+| P2 | D16 `--json` 输出多个文档 | **已修复** | `keil map` / `keil locate` / `debug keil` 的 stdout 整体不是合法 JSON |
 | P2 | D6 workspace `-p` | **已修复** | 5 个子命令补齐 |
 | P2 | D8 无匹配静默成功 | **已修复** | |
 | P2 | D9 daemon 串口参数 | **已修复**（定级由"低"升为"高"） | 非默认数据位被静默忽略 |
@@ -372,6 +383,7 @@ P0 与 P1 共 5 项（D1、D2、D4、D11 及 D5 的 3 个子项）已于同日�
 | P3 | D13 `file-add` 校验 | **已修复** | 保留 exit 0，改打 stderr warning |
 | P3 | D14 `keil map` 展示 | **部分修复** | `OCR_RVCT*` 可见性属新功能 |
 | P3 | D15 `run_tests.sh` | **已修复** | |
+| P3 | D17 `DebugResult.uv4_log` 未读取 | **已修复** | 清 clippy 时发现；接上后 UV4 超时才看得出卡在哪 |
 
 ## 8. 修复记录（2026-09-18）
 
@@ -386,7 +398,7 @@ P0 与 P1 共 5 项（D1、D2、D4、D11 及 D5 的 3 个子项）已于同日�
 | D7 | `src/output/mod.rs` 去掉 `#[serde(untagged)]`、改为手写 `Serialize` 加 `kind`；新增 3 条单测 |
 | D16 | `src/output/mod.rs` 新增 `Sections` 变体；`human.rs`/`ai.rs` 各加一个渲染分支；`keil/mod.rs` 的 `cmd_map` 与 `locate` 改为一次 `display`；新增 `tests/cli_json_shape.rs` 4 条 CLI 测试 |
 | D13 | `src/keil/editor.rs` 的 `file_add` 增加路径存在性提示（stderr）；新增 2 条 CLI 测试 |
-| — | 文档同步：`README.md`（`-p` 签名、optim/wlevel 示例、JSON 契约表）、`skills/keil-dev/references/{commands,editing}.md`、`docs/TEST_SPEC.md`（JSON 用例与验收清单） |
+| — | 文档同步：`README.md`（`-p` 签名、optim/wlevel 示例、JSON 契约表）、`skills/keil-dev/references/{commands,editing}.md`、`docs/plan/测试验收_规格.md`（JSON 用例与验收清单） |
 
 第二轮回归结果：
 
@@ -400,6 +412,24 @@ P0 与 P1 共 5 项（D1、D2、D4、D11 及 D5 的 3 个子项）已于同日�
 | `test_keil_write.py` | **37 项 1 失败**（仅剩 DOM 不保属性顺序这一已知残留） |
 | `verify_map_fix.py` | 三份真实 map 恒等式全过 |
 | D3 端到端 | 真实 1836 行工程净零往返：**1508 → 10 行** |
+
+### 8.8 第三轮：AC5 `wLevel` 更正 / D16 第三处 / clippy 归零（2026-09-22）
+
+| 项 | 改动 |
+|---|---|
+| D11（AC5 分支） | `src/keil/mod.rs` 的 `wlevel_str()` AC5 分支由臆测的 `None/Low/Medium/High` 改为截图证实的 `0=<unspecified> 1=No Warnings 2=All Warnings`；新增 1 条单测 |
+| D16（第三处） | `src/debug/mod.rs` 的 `debug keil` 由两次 `display` 改为一次 `Sections` |
+| D17 | `src/debug/keil_debug.rs` 新增 `log_tail()` 及 3 条单测；`debug::handle` 仅在超时/非零退出时输出 UV4 日志尾部 |
+| 清理 | 删 `output::not_implemented`（死代码）；`parser.rs` 的 `match` 改 `matches!`；`editor.rs` 去掉多余的 `*`；`daemon.rs` 两处 `&[]` 改 `[]`；`protocol.rs` 改用 `is_multiple_of` |
+| 文档 | `docs/TEST_SPEC.md` → `docs/plan/测试验收_规格.md`（按 docs 规范归位并补头部）；引用同步至 `README.md`、`tests/run_tests.sh`、本报告 |
+
+第三轮回归结果：
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test`（单测） | **93 passed / 0 failed**（+4） |
+| `cargo test`（集成，5 个测试二进制） | **20 passed / 0 failed** |
+| `cargo clippy --all-targets` | **0 警告**（此前 7 条） |
 
 ### 8.1 P0
 
@@ -430,7 +460,7 @@ P0 与 P1 共 5 项（D1、D2、D4、D11 及 D5 的 3 个子项）已于同日�
 | `src/serial/daemon.rs` | 用共用映射写命令行与 `meta.toml`；`read`/`history`/`history_clear` 增加存在性检查 |
 | `src/serial/mod.rs` | 跟随字段更名 |
 | `tests/run_tests.sh` | 16 处命令替换补 `|| true`；新增 `check_test_data()` 开局校验 |
-| `docs/TEST_SPEC.md` | 新增"准备测试数据"一节，说明 `Test_Project/*` 不入库及其准备要求 |
+| `docs/plan/测试验收_规格.md` | 新增"准备测试数据"一节，说明 `Test_Project/*` 不入库及其准备要求 |
 
 ### 8.4 回归结果（截至本轮）
 

@@ -68,13 +68,21 @@ pub fn handle(
                     },
                 ),
             ];
-            output::display(&OutputValue::KeyValue(pairs), format);
+            // One document even in --json: the header, the debug dump, and (only
+            // when something went wrong) UV4's own log.
+            let mut sections = vec![OutputValue::KeyValue(pairs)];
             if !res.dump.is_empty() {
                 let filtered = keil_debug::filter_dump(&res.dump);
                 if !filtered.is_empty() {
-                    output::display(&OutputValue::Message(filtered), format);
+                    sections.push(OutputValue::Message(filtered));
                 }
             }
+            if res.timed_out || res.exit_code != 0 {
+                if let Some(tail) = keil_debug::log_tail(&res.uv4_log) {
+                    sections.push(OutputValue::Message(tail));
+                }
+            }
+            output::display(&OutputValue::Sections(sections), format);
         }
     }
     Ok(())

@@ -325,3 +325,50 @@ fn is_command_echo(t: &str) -> bool {
     ];
     CMDS.iter().any(|c| t == *c || t.starts_with(c))
 }
+
+/// Last few non-empty lines of UV4's own log (`-o <file>`).
+///
+/// That log records what UV4 itself did — a failed debugger connect, a target
+/// error — which the .ini dump does not capture, so on a timeout it is often
+/// the only clue. Returns `None` when the log is empty or missing.
+pub fn log_tail(log: &str) -> Option<String> {
+    const TAIL_LINES: usize = 20;
+    let lines: Vec<&str> = log.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.is_empty() {
+        return None;
+    }
+    let start = lines.len().saturating_sub(TAIL_LINES);
+    Some(format!(
+        "UV4 log (last {} lines):\n{}",
+        lines.len() - start,
+        lines[start..].join("\n")
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_tail_is_none_for_an_empty_log() {
+        assert_eq!(log_tail(""), None);
+        assert_eq!(log_tail("\n  \n\n"), None);
+    }
+
+    #[test]
+    fn log_tail_keeps_short_logs_whole() {
+        let t = log_tail("a\n\nb\n").unwrap();
+        assert!(t.contains("last 2 lines"), "{t}");
+        assert!(t.ends_with("a\nb"), "{t}");
+    }
+
+    #[test]
+    fn log_tail_truncates_from_the_front() {
+        let log: String = (1..=30).map(|i| format!("line {i}\n")).collect();
+        let t = log_tail(&log).unwrap();
+        assert!(t.contains("last 20 lines"), "{t}");
+        assert!(t.contains("line 11"), "{t}");
+        assert!(!t.contains("line 10\n"), "{t}");
+        assert!(t.ends_with("line 30"), "{t}");
+    }
+}

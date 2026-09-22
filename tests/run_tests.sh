@@ -53,7 +53,7 @@ check_test_data() {
     if (( ${#missing[@]} > 0 )); then
         echo -e "${RED}错误: 缺少测试工程文件${NC}"
         printf '  %s\n' "${missing[@]}"
-        echo "Test_Project/* 已被 .gitignore 忽略，准备方法见 docs/TEST_SPEC.md"
+        echo "Test_Project/* 已被 .gitignore 忽略，准备方法见 docs/plan/测试验收_规格.md"
         exit 1
     fi
 }

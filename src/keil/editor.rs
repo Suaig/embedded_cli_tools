@@ -390,7 +390,7 @@ pub fn config_set(
             set_element_text(elem, final_value);
         }
         None => {
-            let mut new_elem = Element::new(*leaf_tag);
+            let mut new_elem = Element::new(leaf_tag);
             set_element_text(&mut new_elem, final_value);
             parent.children.push(XMLNode::Element(new_elem));
         }

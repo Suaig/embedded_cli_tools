@@ -68,10 +68,9 @@ fn optim_str(level: u8, ac6: bool) -> String {
 
 /// Warning level: current value + full option map.
 ///
-/// uVision stores the 0-based index into the C/C++ (AC6) "Warnings" dropdown,
-/// whose first entry is `<unspecified>` — the same convention as `optim_str`.
-/// The AC5 branch's labels have not been verified against uVision and are left
-/// as they were.
+/// uVision stores the 0-based index into the C/C++ "Warnings" dropdown, whose
+/// first entry is `<unspecified>` — the same convention as `optim_str`. AC5's
+/// dropdown stops at `All Warnings`; AC6 adds two entries.
 fn wlevel_str(level: u8, ac6: bool) -> String {
     if ac6 {
         const OPTIONS: &str =
@@ -86,12 +85,11 @@ fn wlevel_str(level: u8, ac6: bool) -> String {
         };
         format!("{level} ({label}) {OPTIONS}")
     } else {
-        const OPTIONS: &str = "[0=None 1=Low 2=Medium 3=High]";
+        const OPTIONS: &str = "[0=<unspecified> 1=No Warnings 2=All Warnings]";
         let label = match level {
-            0 => "None",
-            1 => "Low",
-            2 => "Medium",
-            3 => "High",
+            0 => "<unspecified>",
+            1 => "No Warnings",
+            2 => "All Warnings",
             _ => "?",
         };
         format!("{level} ({label}) {OPTIONS}")
@@ -745,6 +743,19 @@ mod tests {
             (4, "MISRA Compatible"),
         ] {
             let s = wlevel_str(value, true);
+            assert!(s.starts_with(&format!("{value} ({label})")), "wLevel {value}: {s}");
+        }
+    }
+
+    /// The AC5 "Warnings" dropdown has three entries.
+    #[test]
+    fn ac5_warning_levels_match_the_uvision_dropdown() {
+        for (value, label) in [
+            (0, "<unspecified>"),
+            (1, "No Warnings"),
+            (2, "All Warnings"),
+        ] {
+            let s = wlevel_str(value, false);
             assert!(s.starts_with(&format!("{value} ({label})")), "wLevel {value}: {s}");
         }
     }

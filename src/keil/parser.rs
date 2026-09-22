@@ -391,14 +391,12 @@ fn parse_files(group_node: Node) -> Vec<FileEntry> {
         .children()
         .filter(|c| c.has_tag_name("File"))
         .map(|f| {
-            let included = match f
-                .children()
-                .find(|c| c.has_tag_name("IncludeInBuild"))
-                .and_then(|c| c.text())
-            {
-                Some("0") => false,
-                _ => true,
-            };
+            let included = !matches!(
+                f.children()
+                    .find(|c| c.has_tag_name("IncludeInBuild"))
+                    .and_then(|c| c.text()),
+                Some("0")
+            );
             FileEntry {
                 name: text_of(f, "FileName"),
                 file_type: text_of(f, "FileType")

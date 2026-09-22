@@ -87,12 +87,6 @@ pub fn display(value: &OutputValue, format: OutputFormat) {
     println!("{text}");
 }
 
-/// Print a "not implemented" message for the given command name.
-pub fn not_implemented(cmd: &str, format: OutputFormat) {
-    let val = OutputValue::Message(format!("{cmd}: not implemented"));
-    display(&val, format);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
