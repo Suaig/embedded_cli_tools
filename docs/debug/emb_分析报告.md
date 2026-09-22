@@ -297,7 +297,7 @@ P0 与 P1 共 5 项（D1、D2、D4、D11 及 D5 的 3 个子项）已于同日�
 - **解决方案**：Keil 自身允许添加尚未创建的文件（先登记后补源码是常见做法），所以**保留 exit 0**，但在 `<FilePath>` 相对 `.uvprojx` 目录解析不到文件时向 stderr 打 `warning: '<path>' does not exist yet (looked for <resolved>)`。选 stderr 而非 stdout，是为了不动 `--json` / `--ai` 已有的输出契约。
 - **验证**（2026-09-18）：新增 2 条 CLI 测试 —— 不存在的路径必须 exit 0 且 stderr 含该路径名；存在的路径必须不产生任何 warning（防止修过头）。`test_keil_write.py` 的对应检查由"必须报错"改为"exit 0 且 stderr 含路径名"，两条均通过。
 
-### D14 [提示] `keil map` 的展示细节 —— 部分修复
+### D14 [提示] `keil map` 的展示细节与内存区可见性 —— 已修复
 
 - **问题表象**：
   - Region 表 `Size` 列给十六进制 + 十进制（`0x600 (1536)`），而 `Max` 列只给十六进制，同一张表两种风格。
@@ -307,11 +307,13 @@ P0 与 P1 共 5 项（D1、D2、D4、D11 及 D5 的 3 个子项）已于同日�
   - `Size` 用 `format!("0x{:X} ({})", ...)`、`Max` 用 `format!("0x{:X}", ...)`，两处写法不一致（`src/keil/mod.rs` 的 `cmd_map`）。
   - 属性提取用 `inside.rsplit(',').next()`，取的是逗号分隔的**最后一节**，而非 `Max:` 字段之后的整段（`src/keil/map.rs` 的 `parse_exec_region`）。
   - `config memory.*` 只解析 Keil 的旧式 `<IROM>/<IRAM>/<XRAM>` 标签，不解析 `<OCR_RVCT*>`。**工具报告的没有错**——`<XRAM>` 在文件里确实是 `0x0/0x0`——只是不完整。
+  - 2026-09-22 实测补充：`irom`/`iram` 与 `OCR_RVCT4`/`OCR_RVCT9` 是同一批数据（Keil 两处同步写），而 `xram` 是空的历史字段。工程真正生效的内存区全在 `<OCR_RVCT1..10>` 里，所以 `memory.xram:0x0/0x0` 会让人误判「没有第二块 RAM」——实测 SlotA/SlotB/Boot 三个 target 都有 `OCR_RVCT10 = 0x24000000/0x71c00`（464KB）完全不可见。
 - **解决方案**：
   - 已修复：`Max` 列统一为 `0x{hex} ({dec})`，与 `Size` 列一致。
   - 已修复：属性改为取 `Max:` 之后的完整字符串。
-  - **未修改（属功能缺口，非缺陷）**：补齐 `OCR_RVCT*` 需要往 `config` 输出里加一族新的只读键，会与「config 输出的 key 可直接喂给 config-set」的闭环约定冲突，属于需要拍板的新功能，本轮未动。
+  - **已修复（2026-09-22）**：按用户拍板的方案，**不放 `config` 而放 `keil info`** —— `config` 的「输出即可喂 `config-set`」闭环不被破坏。`parser.rs` 新增 `MemoryArea` 与 `parse_memory_areas()`，`keil info -t <T>` 在有内存区时追加一张 `Area`/`Type`/`Start`/`Size` 表。只列 size 非零的槽位（10 个槽位里工程实际用 3 个，全列是噪音）；`Area` 列填 `.uvprojx` 里的**源标签名**（`OCR_RVCT4` 等）而非自造别名——芯片的 ROM/RAM 显示名来自 Keil 器件库，不在工程文件里，编不出来。
 - **验证**（2026-09-18）：真实 map 实测 —— `RW_IRAM1_DTCM_HEAP` 现在输出 `ABSOLUTE, UNINIT, COMPRESSED[0x000001e4]`，`Max` 列输出 `0x10000 (65536)`。新增单测 `keeps_every_attribute_of_an_execution_region`（用真实多属性行），RED 为 `left: "COMPRESSED[0x000001e4]"`。
+- **验证**（2026-09-22，内存区）：真实工程三个 target 均输出 `OCR_RVCT4`(ROM) / `OCR_RVCT9`(RAM) / `OCR_RVCT10`(RAM, `0x24000000`, `0x71c00`)；`--json` 是单个 `sections` 文档（`kv` + `table`，`jq` 一次解析通过）。新增单测 `parses_active_on_chip_memory_areas`。副作用：`keil info -t <T>` 的 `--json` 形状由 `kv` 变为 `sections`（属已接受的破坏性变更，与 D16 同一处理方式）。
 
 ### D15 [提示] `tests/run_tests.sh` 无法在干净 clone 上运行，且首条失败即中止 —— 已修复
 
@@ -381,7 +383,7 @@ P0 与 P1 共 5 项（D1、D2、D4、D11 及 D5 的 3 个子项）已于同日�
 | P3 | D10 `serial scan` 名称 | **已修复** | |
 | P3 | D12 `SchemaVersion` | **已修复** | 不改变可见行为，消除隐患 |
 | P3 | D13 `file-add` 校验 | **已修复** | 保留 exit 0，改打 stderr warning |
-| P3 | D14 `keil map` 展示 | **部分修复** | `OCR_RVCT*` 可见性属新功能 |
+| P3 | D14 `keil map` 展示 / 内存区可见性 | **已修复** | `OCR_RVCT*` 于 2026-09-22 放进 `keil info`，`config` 契约不动 |
 | P3 | D15 `run_tests.sh` | **已修复** | |
 | P3 | D17 `DebugResult.uv4_log` 未读取 | **已修复** | 清 clippy 时发现；接上后 UV4 超时才看得出卡在哪 |
 
@@ -413,13 +415,14 @@ P0 与 P1 共 5 项（D1、D2、D4、D11 及 D5 的 3 个子项）已于同日�
 | `verify_map_fix.py` | 三份真实 map 恒等式全过 |
 | D3 端到端 | 真实 1836 行工程净零往返：**1508 → 10 行** |
 
-### 8.8 第三轮：AC5 `wLevel` 更正 / D16 第三处 / clippy 归零（2026-09-22）
+### 8.8 第三轮：AC5 `wLevel` 更正 / D16 第三处 / D14 内存区 / clippy 归零（2026-09-22）
 
 | 项 | 改动 |
 |---|---|
 | D11（AC5 分支） | `src/keil/mod.rs` 的 `wlevel_str()` AC5 分支由臆测的 `None/Low/Medium/High` 改为截图证实的 `0=<unspecified> 1=No Warnings 2=All Warnings`；新增 1 条单测 |
 | D16（第三处） | `src/debug/mod.rs` 的 `debug keil` 由两次 `display` 改为一次 `Sections` |
 | D17 | `src/debug/keil_debug.rs` 新增 `log_tail()` 及 3 条单测；`debug::handle` 仅在超时/非零退出时输出 UV4 日志尾部 |
+| D14（内存区） | `src/keil/parser.rs` 新增 `MemoryArea` 与 `parse_memory_areas()`；`src/keil/mod.rs` 的 `cmd_info_project` 追加内存区表并改用 `Sections`；新增 1 条单测。方案经用户拍板：放 `keil info` 而非 `config`，避免破坏 config 闭环 |
 | 清理 | 删 `output::not_implemented`（死代码）；`parser.rs` 的 `match` 改 `matches!`；`editor.rs` 去掉多余的 `*`；`daemon.rs` 两处 `&[]` 改 `[]`；`protocol.rs` 改用 `is_multiple_of` |
 | 文档 | `docs/TEST_SPEC.md` → `docs/plan/测试验收_规格.md`（按 docs 规范归位并补头部）；引用同步至 `README.md`、`tests/run_tests.sh`、本报告 |
 
@@ -427,7 +430,7 @@ P0 与 P1 共 5 项（D1、D2、D4、D11 及 D5 的 3 个子项）已于同日�
 
 | 检查 | 结果 |
 |---|---|
-| `cargo test`（单测） | **93 passed / 0 failed**（+4） |
+| `cargo test`（单测） | **94 passed / 0 failed**（+5） |
 | `cargo test`（集成，5 个测试二进制） | **20 passed / 0 failed** |
 | `cargo clippy --all-targets` | **0 警告**（此前 7 条） |
 

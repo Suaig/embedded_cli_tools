@@ -190,6 +190,24 @@ fn resolve_project_path(
 // Command handlers
 // ---------------------------------------------------------------------------
 
+/// Table of a target's active on-chip memory areas (`<OCR_RVCT*>`).
+fn memory_areas_table(areas: &[parser::MemoryArea]) -> OutputValue {
+    OutputValue::Table {
+        headers: vec!["Area".into(), "Type".into(), "Start".into(), "Size".into()],
+        rows: areas
+            .iter()
+            .map(|a| {
+                vec![
+                    a.tag.clone(),
+                    if a.is_rom { "ROM" } else { "RAM" }.into(),
+                    a.start.clone(),
+                    a.size.clone(),
+                ]
+            })
+            .collect(),
+    }
+}
+
 fn cmd_info_project(
     project: &KeilProject,
     target_name: &Option<String>,
@@ -217,7 +235,11 @@ fn cmd_info_project(
                 ("Files".into(), total_files.to_string()),
                 ("Include In Build".into(), if t.include_in_build { "yes" } else { "no" }.into()),
             ];
-            output::display(&OutputValue::KeyValue(pairs), format);
+            let mut sections = vec![OutputValue::KeyValue(pairs)];
+            if !t.memory.areas.is_empty() {
+                sections.push(memory_areas_table(&t.memory.areas));
+            }
+            output::display(&OutputValue::Sections(sections), format);
         }
         None => {
             // List all targets

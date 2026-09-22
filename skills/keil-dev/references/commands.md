@@ -8,7 +8,7 @@
 
 | 命令 | 用途 |
 |---|---|
-| `emb keil info     <proj>` | 工程概览（targets / 芯片 / 输出目录） |
+| `emb keil info     <proj> [-t <T>]` | 工程概览（targets / 芯片 / 输出目录）；带 `-t` 时另附该 target 的内存区表 |
 | `emb keil config   <proj> -t <T> [category]` | target 配置 |
 | `emb keil defines  <proj> -t <T>` | 预处理宏 |
 | `emb keil includes <proj> -t <T>` | include 路径 |
@@ -18,6 +18,8 @@
 上表均可加 `[-p <project>]`。
 
 `config` 的 `category` 只接受顶层分类（`device`/`output`/`ccompiler`/`asm`/`linker`/`memory`），**不接受具体键**（`ccompiler.optim` 会报错并列出可选分类）。`config <category>` 与 `files -g <group>` 在无匹配时返回非零退出码，不会静默给空结果。
+
+`config memory.irom` / `iram` / `xram` 读的是 Keil 的老式标签，其中 `xram` 在多数工程里是空的历史字段——**别拿它判断"没有第二块 RAM"**。真正生效的内存区在 `<OCR_RVCT1..10>` 里，用 `keil info -t <T>` 看（列出所有 size 非零的区，含 ROM/RAM 类型）。
 
 ## 定位（省 token，见 editing.md）
 

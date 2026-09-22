@@ -158,10 +158,10 @@ ccompiler.wlevel:3 (AC5-like Warnings) [0=<unspecified> 1=No Warnings 2=All Warn
 | kind | 其余字段 | 命令 |
 |---|---|---|
 | `table` | `headers`、`rows` | `keil info`（不指定 target）、`keil groups`、`keil files`、`ioc info`、`serial scan`、`serial daemon list`、`serial daemon history` |
-| `kv` | `entries`（`[key, value]` 数组） | `keil info -t <T>`、`keil config`、`keil build`、`ioc get <前缀>`、`config set` / `unset` |
+| `kv` | `entries`（`[key, value]` 数组） | `keil config`、`keil build`、`ioc get <前缀>`、`config set` / `unset` |
 | `list` | `items` | `keil defines`、`keil includes` |
 | `message` | `value` | 写类命令的 `"ok"`、`ioc get <精确键>`、`keil locate` 的原文片段、`serial` 的空态提示 |
-| `sections` | `sections`（上面几种的数组） | `keil map`、`keil locate` —— 一条命令要输出两块内容时 |
+| `sections` | `sections`（上面几种的数组） | `keil map`、`keil locate`、`keil info -t <T>`（KV 头 + 可选的内存区表）、`debug keil`（KV 头 + dump + 出错时的 UV4 日志）—— 一条命令要输出多块内容时 |
 
 ```bash
 $ emb --json ioc get project.ioc Mcu.Name     # 精确命中 → message

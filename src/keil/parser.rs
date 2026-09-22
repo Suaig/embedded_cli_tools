@@ -90,6 +90,22 @@ pub struct MemoryInfo {
     pub irom: MemoryRegion,
     pub iram: MemoryRegion,
     pub xram: MemoryRegion,
+    /// The `<OCR_RVCT1..10>` slots that are actually in use, in slot order.
+    ///
+    /// uVision's Target page edits these; `irom`/`iram`/`xram` above mirror
+    /// two of the slots and are kept for compatibility, while `xram` is often
+    /// a stale zero even when the target has a second RAM area.
+    pub areas: Vec<MemoryArea>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MemoryArea {
+    /// Element name in the .uvprojx, e.g. `OCR_RVCT10`.
+    pub tag: String,
+    /// `<Type>`: 1 = ROM (read-only), 0 = RAM (read/write).
+    pub is_rom: bool,
+    pub start: String,
+    pub size: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -174,6 +190,36 @@ fn parse_memory_region(parent: Node, tag: &str) -> MemoryRegion {
             size: String::new(),
         }
     }
+}
+
+/// Collect the `<OCR_RVCT1..10>` slots that have a non-zero size.
+fn parse_memory_areas(on_chip: Option<Node>) -> Vec<MemoryArea> {
+    let Some(oc) = on_chip else {
+        return Vec::new();
+    };
+    (1..=10)
+        .filter_map(|i| {
+            let tag = format!("OCR_RVCT{i}");
+            let m = child(oc, &tag)?;
+            let size = text_of(m, "Size");
+            if is_zero_num(&size) {
+                return None;
+            }
+            Some(MemoryArea {
+                tag,
+                is_rom: text_of(m, "Type") == "1",
+                start: text_of(m, "StartAddress"),
+                size,
+            })
+        })
+        .collect()
+}
+
+/// True for `""`, `"0"`, `"0x0"`, `"0x00000000"` — i.e. an unused slot.
+fn is_zero_num(s: &str) -> bool {
+    let t = s.trim();
+    let t = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")).unwrap_or(t);
+    t.is_empty() || t.chars().all(|c| c == '0')
 }
 
 // ---------------------------------------------------------------------------
@@ -342,6 +388,7 @@ fn parse_target(target_node: Node) -> Target {
                 start: String::new(),
                 size: String::new(),
             }),
+        areas: parse_memory_areas(on_chip),
     };
 
     // Groups
@@ -505,6 +552,53 @@ pub fn is_project_file(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// uVision's Target page edits `<OCR_RVCT1..10>`; `irom`/`iram`/`xram`
+    /// mirror two of them and `xram` is often a stale zero, so the slots with
+    /// a non-zero size are the areas that actually exist.
+    #[test]
+    fn parses_active_on_chip_memory_areas() {
+        const XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Project>
+  <SchemaVersion>2.1</SchemaVersion>
+  <Targets>
+    <Target>
+      <TargetName>T</TargetName>
+      <TargetOption>
+        <TargetCommonOption><Device>D</Device></TargetCommonOption>
+        <CommonProperty><IncludeInBuild>1</IncludeInBuild></CommonProperty>
+        <TargetArmAds>
+          <ArmAdsMisc>
+            <OnChipMemories>
+              <XRAM><Type>0</Type><StartAddress>0x0</StartAddress><Size>0x0</Size></XRAM>
+              <OCR_RVCT1><Type>1</Type><StartAddress>0x0</StartAddress><Size>0x0</Size></OCR_RVCT1>
+              <OCR_RVCT4><Type>1</Type><StartAddress>0x8000000</StartAddress><Size>0x10000</Size></OCR_RVCT4>
+              <OCR_RVCT9><Type>0</Type><StartAddress>0x20000000</StartAddress><Size>0x10000</Size></OCR_RVCT9>
+              <OCR_RVCT10><Type>0</Type><StartAddress>0x24000000</StartAddress><Size>0x71c00</Size></OCR_RVCT10>
+            </OnChipMemories>
+          </ArmAdsMisc>
+        </TargetArmAds>
+      </TargetOption>
+    </Target>
+  </Targets>
+</Project>"#;
+
+        let proj = parse_project(XML).unwrap();
+        let got: Vec<(&str, bool, &str, &str)> = proj.targets[0]
+            .memory
+            .areas
+            .iter()
+            .map(|a| (a.tag.as_str(), a.is_rom, a.start.as_str(), a.size.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("OCR_RVCT4", true, "0x8000000", "0x10000"),
+                ("OCR_RVCT9", false, "0x20000000", "0x10000"),
+                ("OCR_RVCT10", false, "0x24000000", "0x71c00"),
+            ]
+        );
+    }
 
     #[test]
     fn test_parse_minimal_project() {
