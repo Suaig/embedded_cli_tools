@@ -23,6 +23,8 @@ emb serial send --port COM7 ...           # 错：clap 报 unexpected argument
 
 `send` 写完就关端口，所以**别拿它跟 `recv` 配对等应答**——中间端口已经关了。要问答就用 daemon。
 
+端口打不开时错误里会带端口名和提示。有个坑：Windows 上「端口不存在」和「端口被别的程序占着」在 serialport 里是**同一个**错误种类（`ERROR_ACCESS_DENIED` 被折叠进 `NoDevice`），所以提示会把两种可能都列出来。看到 `Access is denied` 别默认是权限问题，先想想是不是有 daemon / Keil / 串口终端占着。
+
 ## 常驻 daemon
 
 ```bash
@@ -34,25 +36,23 @@ emb serial daemon list
 emb serial daemon stop  fan
 ```
 
-- `--id` 是自定义短名，省略则生成 uuid；多实例可同时跑。
+- `--id` 是自定义短名，省略则生成 uuid；多实例可同时跑。id 必须是**普通名字**——含路径分隔符、盘符或 `.` / `..` 会被直接拒绝，因为它是状态目录名。
+- `start` 会**确认子进程真的起来了**才开始报成功：端口被占或名字写错时，它会给出原因并返回非 0，而不是打印一个 id 就走。
+- `send` 的 `ok` 表示**字节已经交给 daemon 写出去**了。daemon 写失败（端口掉线、驱动卡死）时 `send` 会报错，不再静默丢数据。
 - `read` 是**取走**语义（读过就没了），`history` 是留档。
 - **用完必须 `stop`**：端口被 daemon 占着时别的工具（Keil 下载、otf 上位机）打不开。
 - 控制字符 / 二进制一律用 `--hex`——转义没法直接写在参数里。
 - 默认 115200 8N1。
 
-### daemon start 的输出必须重定向掉
+### 输出可以进管道
+
+`daemon start` 及其它命令都可以安全地接管道、放进 `$( )`：
 
 ```bash
-emb serial daemon start COM7 --id fan >/dev/null 2>&1 </dev/null
-                                       ^^^^^^^^^^^^^^^^^^^^^^^
+ID=$(emb serial daemon start COM7 --id fan)   # 直接捕获，$( ) 会剥掉尾部换行
 ```
 
-不带这段，调用方会被**永久挂死**：daemon 是 detach 出来的常驻进程，而 Windows 上 Rust 的 `std::process::Command` 会把所有可继承句柄都传给子进程、**没有白名单**（[rust-lang/rust#161158](https://github.com/rust-lang/rust/issues/161158)）。于是它继承并一直持有调用方的 stdout 管道，`| head` / `| cat` 永远等不到 EOF——外层 `timeout` 也救不了，它只杀父进程，而父进程早就退了。
-
-`emb` 现已改用 `CreateProcessW` + `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`，只放行三个 NUL 句柄（`src/serial/spawn.rs`）：
-
-- **已修复的构建**：管道里调用正常（实测 350 ms 返回）。
-- **更早的构建**：必须重定向。
+（0.1.0 之前的构建不行：daemon 会继承并一直持有调用方的 stdout 管道，`| head` 永不返回 —— 根因见 `src/serial/spawn.rs` 的模块注释。老版本必须 `>/dev/null 2>&1 </dev/null`。）
 
 ## 驱动 letter shell
 
