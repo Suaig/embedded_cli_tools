@@ -2,8 +2,6 @@ use std::fs;
 use std::io::Write as IoWrite;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -147,30 +145,26 @@ pub fn start(
         serialport::Parity::Even => "even",
     };
 
-    let child = Command::new(&exe)
-        .arg("--internal-daemon")
-        .arg(&daemon_id)
-        .arg("--port")
-        .arg(port_name)
-        .arg("--baud")
-        .arg(baud_rate.to_string())
-        .arg("--data-bits")
-        .arg(&data_bits_str)
-        .arg("--parity")
-        .arg(parity_str)
-        .arg("--stop-bits")
-        .arg(&stop_bits_str)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .stdin(Stdio::null())
-        // Windows: detach from console via CREATE_NEW_PROCESS_GROUP
-        // Unix: use setsid via process group
-        .creation_flags(0x00000200) // CREATE_NEW_PROCESS_GROUP
-        .spawn()?;
-
-    let pid = child.id();
-    // Drop the Child handle so we don't wait on it
-    drop(child);
+    // spawn_detached, not Command::spawn: std's Windows Command cannot restrict
+    // handle inheritance, so the detached daemon would inherit and keep holding
+    // whatever pipe our caller attached to us. See src/serial/spawn.rs.
+    let pid = super::spawn::spawn_detached(
+        &exe,
+        &[
+            "--internal-daemon".to_string(),
+            daemon_id.clone(),
+            "--port".to_string(),
+            port_name.to_string(),
+            "--baud".to_string(),
+            baud_rate.to_string(),
+            "--data-bits".to_string(),
+            data_bits_str,
+            "--parity".to_string(),
+            parity_str.to_string(),
+            "--stop-bits".to_string(),
+            stop_bits_str,
+        ],
+    )?;
 
     // Write initial metadata
     let meta = DaemonMeta {

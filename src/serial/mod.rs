@@ -1,6 +1,7 @@
 pub mod port;
 pub mod daemon;
 pub mod protocol;
+pub mod spawn;
 
 use crate::output::{self, OutputFormat, OutputValue};
 use port::{SerialConfig};

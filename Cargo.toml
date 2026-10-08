@@ -20,3 +20,16 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 comfy-table = "7"
+
+# Windows only: spawn the serial daemon with an explicit handle whitelist
+# (PROC_THREAD_ATTRIBUTE_HANDLE_LIST). std::process::Command cannot restrict
+# handle inheritance, which lets the detached daemon keep the caller's stdout
+# pipe open forever and hang anything that pipes our output. See
+# src/serial/spawn.rs.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+] }
