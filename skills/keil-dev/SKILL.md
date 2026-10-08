@@ -1,6 +1,6 @@
 ---
 name: keil-dev
-description: Keil MDK 嵌入式工程（.uvprojx / .uvmpw）的完整开发——编译/烧录、查看与修改工程配置、增删源文件与宏、分析 .map 内存布局、在大型 XML 工程文件里精准定位做编辑、以及 UV4 -d 脚本化调试（读寄存器/内存/断点/单步 dump）。配套 CLI 是 emb（Rust 二进制）。当工作区含 .uvprojx 或 .uvmpw，或用户提到 Keil/MDK/UV4/ARMCLANG/armclang/armcc/scatter file/.axf/.map/Flash Download/CMSIS-DAP 时，必须使用本 skill——优先用 emb 命令，不要手动翻 XML、不要猜 UV4 命令行参数。
+description: Keil MDK 嵌入式工程（.uvprojx / .uvmpw）的完整开发——编译/烧录、查看与修改工程配置、增删源文件与宏、分析 .map 内存布局、在大型 XML 工程文件里精准定位做编辑、UV4 -d 脚本化调试（读寄存器/内存/断点/单步 dump）、以及串口扫描/收发/常驻 daemon。配套 CLI 是 emb（Rust 二进制）。当工作区含 .uvprojx 或 .uvmpw，或用户提到 Keil/MDK/UV4/ARMCLANG/armclang/armcc/scatter file/.axf/.map/Flash Download/CMSIS-DAP，或要操作串口（COM 口、serial、串口收发、daemon）时，必须使用本 skill——优先用 emb 命令，不要手动翻 XML、不要猜 UV4 命令行参数、不要自己写串口脚本。
 ---
 
 # Keil MDK 工程开发
@@ -24,6 +24,7 @@ description: Keil MDK 嵌入式工程（.uvprojx / .uvmpw）的完整开发—�
 | **看内存用量 / 布局** | `emb keil map xxx.map` | commands.md |
 | **读硬件状态**（寄存器/内存，调试） | `emb debug keil --regs / --read` | debug.md |
 | **查/改 CubeMX .ioc** | 直接读 .ioc（小文件）+ `emb ioc get` | commands.md |
+| **收发串口 / 常驻监听** | `emb serial scan / send / recv / daemon …` | serial.md |
 
 ## 三条最关键的原则
 
@@ -43,6 +44,7 @@ editor 底层用 xmltree，会重排属性、丢 `xsi:` 前缀、删空行。Kei
 - `--run-to` / 裸运行后断点没命中，程序一直跑，靠 `--timeout` 兜底（exit 124）。断点用具体函数名/地址。
 - 多 target 工程 `-t <T>` 必填，否则操作第一个 target。
 - emb 找 UV4 顺序：`emb config keil_path` > 环境变量 > `C:\Keil_v5` > 扫描 Program Files。非标准安装位置配一次 config 即全局生效（build/flash/debug 都读它）。
+- `emb serial daemon start` 必须把输出重定向掉（`>/dev/null 2>&1 </dev/null`）：daemon 是 detach 的常驻进程，会一直持有调用方的 stdout 管道，把 `| head` / `| cat` 挂死。端口是**位置参数**，不叫 `--port`。详见 serial.md。
 
 ## references（按需读，不要一次全读）
 
@@ -52,3 +54,4 @@ editor 底层用 xmltree，会重排属性、丢 `xsi:` 前缀、删空行。Kei
 | 命令参数记不准 | references/commands.md |
 | 要改 .uvprojx（locate 工作流 / editor 格式警告） | references/editing.md |
 | 要调试（UV4 -d 边界 / 命令 / .ini） | references/debug.md |
+| 要用串口（扫描 / 收发 / daemon / 驱动 letter shell） | references/serial.md |
