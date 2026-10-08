@@ -17,6 +17,14 @@ use super::port::SerialConfig;
 /// Max history file size before pruning (5 MB).
 const HISTORY_MAX_SIZE: u64 = 5 * 1024 * 1024;
 
+/// Cap on unread received bytes.
+///
+/// Nothing else prunes buffer.bin - it only shrinks when `read` collects it. A
+/// board that talks continuously while nobody reads (a `cat /dev/zero`, a log
+/// spew) would otherwise grow it until the disk fills, and `read` would then
+/// load the whole thing into memory.
+const BUFFER_MAX_SIZE: u64 = 4 * 1024 * 1024;
+
 /// How long `start` waits for the detached child to report that it came up.
 /// Only ever paid in full when the child is slow to open the port; a healthy
 /// start returns as soon as the child writes its `ready` file.
@@ -528,6 +536,7 @@ pub fn serve(
                 append_history(&hist_path, "recv", &read_buf[..n]);
                 // Prune history if it exceeds the size limit
                 let _ = prune_history_if_needed(&hist_path);
+                let _ = trim_buffer_if_needed(&buf_path);
             }
             Ok(_) => {
                 // 0 bytes, should not happen with timeout
@@ -715,6 +724,24 @@ fn prune_history_if_needed(path: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Drop the OLDEST bytes once buffer.bin passes BUFFER_MAX_SIZE.
+///
+/// The file holds data `read` has not collected yet, so when it overflows the
+/// newest bytes are the ones still worth keeping. It trims down to half the cap
+/// rather than to the cap, so a continuous stream does not pay a 4 MB rewrite
+/// on every chunk that follows.
+fn trim_buffer_if_needed(path: &PathBuf) -> anyhow::Result<()> {
+    let meta = fs::metadata(path)?;
+    if meta.len() <= BUFFER_MAX_SIZE {
+        return Ok(());
+    }
+
+    let data = fs::read(path)?;
+    let from = data.len().saturating_sub((BUFFER_MAX_SIZE / 2) as usize);
+    fs::write(path, &data[from..])?;
+    Ok(())
+}
+
 /// Set up a Ctrl+C handler that sets a flag.
 fn ctrlc_handler<F: FnOnce() + Send + 'static>(handler: F) {
     // We use a simple approach: just set the running flag to false.
@@ -733,5 +760,42 @@ fn ctrlc_handler<F: FnOnce() + Send + 'static>(handler: F) {
             // The daemon runs in a new process group, so it won't receive
             // Ctrl+C from the parent console. No special handling needed.
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Bytes that make a wrong slice obvious: every position is distinguishable.
+    fn numbered(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8).collect()
+    }
+
+    #[test]
+    fn trim_buffer_leaves_a_small_buffer_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("buffer.bin");
+        fs::write(&path, numbered(1024)).unwrap();
+
+        trim_buffer_if_needed(&path).unwrap();
+
+        assert_eq!(fs::metadata(&path).unwrap().len(), 1024);
+    }
+
+    #[test]
+    fn trim_buffer_keeps_the_newest_half_of_an_overflowing_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("buffer.bin");
+        let total = BUFFER_MAX_SIZE as usize + 4096;
+        let data = numbered(total);
+        fs::write(&path, &data).unwrap();
+
+        trim_buffer_if_needed(&path).unwrap();
+
+        let kept = fs::read(&path).unwrap();
+        let expected = (BUFFER_MAX_SIZE / 2) as usize;
+        assert_eq!(kept.len(), expected);
+        assert_eq!(kept, &data[total - expected..], "must keep the newest bytes");
     }
 }
