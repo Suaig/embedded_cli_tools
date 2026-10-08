@@ -219,7 +219,9 @@ mod imp {
                 EXTENDED_STARTUPINFO_PRESENT | CREATE_NEW_PROCESS_GROUP,
                 ptr::null(),
                 ptr::null(),
-                &mut si.StartupInfo,
+                // The EX struct starts with the plain one, and its cb already
+                // says so - passing the first field is what the API expects.
+                &si.StartupInfo,
                 &mut pi,
             );
             if ok == 0 {

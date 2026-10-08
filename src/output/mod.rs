@@ -82,9 +82,13 @@ pub fn render(value: &OutputValue, format: OutputFormat) -> String {
 }
 
 /// Convenience: render and print to stdout.
+/// Print a rendered block.
+///
+/// `render()` already terminates every block with a newline, so this must not
+/// add another: `println!` here gave every command a trailing blank line, which
+/// `tail -1` and command substitution then treated as the output.
 pub fn display(value: &OutputValue, format: OutputFormat) {
-    let text = render(value, format);
-    println!("{text}");
+    print!("{}", render(value, format));
 }
 
 #[cfg(test)]

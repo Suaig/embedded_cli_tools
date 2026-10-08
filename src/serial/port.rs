@@ -151,6 +151,26 @@ pub fn stop_bits_from_value(value: u8) -> Option<StopBits> {
     }
 }
 
+/// Turn a port-open failure into something actionable.
+///
+/// `serialport`'s own error is a bare OS string that never says which port was
+/// meant, which is useless the moment more than one is in play. It also cannot
+/// be made more specific than this: on Windows the crate folds
+/// `ERROR_ACCESS_DENIED` (the port is busy) into `ErrorKind::NoDevice`, the
+/// same kind as "no such port" - so the two cases are indistinguishable in
+/// code, and the hint has to name both rather than guess one.
+pub fn describe_open_error(port_name: &str, err: &serialport::Error) -> String {
+    let mut msg = format!("cannot open {port_name}: {err}");
+    if matches!(err.kind(), serialport::ErrorKind::NoDevice) {
+        msg.push_str(
+            " - either no such port, or something else already holds it (a running \
+             `emb serial daemon`, Keil, or a serial terminal); `emb serial scan` \
+             lists what is available",
+        );
+    }
+    msg
+}
+
 /// Send data to a serial port (open, send, close).
 pub fn send(port_name: &str, data: &[u8], config: &SerialConfig) -> anyhow::Result<()> {
     let mut port = serialport::new(port_name, config.baud_rate)
@@ -158,7 +178,8 @@ pub fn send(port_name: &str, data: &[u8], config: &SerialConfig) -> anyhow::Resu
         .parity(config.parity)
         .stop_bits(config.stop_bits)
         .timeout(Duration::from_secs(5))
-        .open()?;
+        .open()
+        .map_err(|e| anyhow::anyhow!(describe_open_error(port_name, &e)))?;
     port.write_all(data)?;
     port.flush()?;
     Ok(())
@@ -171,7 +192,8 @@ pub fn recv(port_name: &str, timeout_ms: u64, config: &SerialConfig) -> anyhow::
         .parity(config.parity)
         .stop_bits(config.stop_bits)
         .timeout(Duration::from_millis(timeout_ms))
-        .open()?;
+        .open()
+        .map_err(|e| anyhow::anyhow!(describe_open_error(port_name, &e)))?;
 
     let mut buf = vec![0u8; 4096];
     let mut received = Vec::new();

@@ -17,6 +17,11 @@ use super::port::SerialConfig;
 /// Max history file size before pruning (5 MB).
 const HISTORY_MAX_SIZE: u64 = 5 * 1024 * 1024;
 
+/// How long `start` waits for the detached child to report that it came up.
+/// Only ever paid in full when the child is slow to open the port; a healthy
+/// start returns as soon as the child writes its `ready` file.
+const START_SETTLE_MS: u64 = 2000;
+
 /// When history exceeds the limit, prune to this ratio (keep last 50%).
 const HISTORY_KEEP_RATIO: f64 = 0.5;
 
@@ -90,6 +95,25 @@ fn send_data_path(id: &str) -> PathBuf {
     state_dir(id).join("send_data")
 }
 
+/// Written by the daemon once startup succeeded - the parent waits for it.
+fn ready_path(id: &str) -> PathBuf {
+    state_dir(id).join("ready")
+}
+
+/// Written by the daemon instead of `ready` when startup failed, holding the
+/// reason. The child's stderr is NUL, so a bare error return would be invisible
+/// to the parent that spawned it.
+fn error_path(id: &str) -> PathBuf {
+    state_dir(id).join("error.txt")
+}
+
+/// Written by the daemon when it could not push staged bytes onto the wire
+/// (port unplugged, driver wedged). Without it a failed send looks exactly
+/// like a successful one: the staging file disappears either way.
+fn send_error_path(id: &str) -> PathBuf {
+    state_dir(id).join("send_error.txt")
+}
+
 /// Path to the shutdown signal file.
 fn shutdown_path(id: &str) -> PathBuf {
     state_dir(id).join("shutdown")
@@ -115,6 +139,7 @@ pub fn start(
 ) -> anyhow::Result<String> {
     let daemon_id = match id {
         Some(custom) => {
+            validate_id(custom)?;
             // Validate no existing daemon uses this ID
             let existing = meta_path(custom);
             if existing.exists() {
@@ -134,6 +159,9 @@ pub fn start(
     // Create state directory
     let sdir = state_dir(&daemon_id);
     fs::create_dir_all(&sdir)?;
+    // A reused id may carry a previous run's verdict; start from a clean slate.
+    let _ = fs::remove_file(ready_path(&daemon_id));
+    let _ = fs::remove_file(error_path(&daemon_id));
 
     // Build the child command: emb --internal-daemon <id> --port <port> --baud <baud> ...
     let exe = std::env::current_exe()?;
@@ -179,6 +207,41 @@ pub fn start(
         status: "running".to_string(),
     };
     write_meta(&meta)?;
+
+    // The child is detached, so nothing otherwise tells us whether it actually
+    // came up: a busy port or a bad port name kills it within milliseconds and
+    // we would report success regardless. Wait for it to either confirm (it
+    // writes `ready`) or explain (it writes `error.txt`).
+    let deadline = Instant::now() + Duration::from_millis(START_SETTLE_MS);
+    loop {
+        if error_path(&daemon_id).exists() {
+            let reason = fs::read_to_string(error_path(&daemon_id)).unwrap_or_default();
+            cleanup_state(&daemon_id);
+            anyhow::bail!(
+                "daemon '{}' failed to start: {}",
+                daemon_id,
+                reason.trim()
+            );
+        }
+        if ready_path(&daemon_id).exists() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            // Neither signal arrived. One last look before deciding: a process
+            // that is gone did not make it, one that is alive is just slow
+            // (some USB-serial drivers take a while to open).
+            if !is_process_alive(pid) {
+                cleanup_state(&daemon_id);
+                anyhow::bail!(
+                    "daemon '{}' exited during startup (PID {}) - no reason recorded",
+                    daemon_id,
+                    pid
+                );
+            }
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
 
     Ok(daemon_id)
 }
@@ -227,27 +290,44 @@ pub fn send(id: &str, data: &[u8]) -> anyhow::Result<()> {
     }
 
     let send_path = send_data_path(id);
+    let err_path = send_error_path(id);
+    let _ = fs::remove_file(&err_path); // a previous failure is not this one
     fs::write(&send_path, data)?;
 
-    // Wait briefly for the daemon to consume the file (up to 2 seconds)
-    let start = Instant::now();
-    let timeout = Duration::from_secs(2);
-    while start.elapsed() < timeout {
-        if !send_path.exists() {
-            return Ok(());
+    // The daemon picks the file up within one loop iteration (its port read
+    // times out after 100 ms), so approaching the deadline below means it is
+    // not doing its job, not that it is a bit slow.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let consumed = match fs::metadata(&send_path) {
+            Ok(m) => m.len() == 0,
+            Err(_) => true, // gone: consumed
+        };
+        if consumed {
+            let _ = fs::remove_file(&send_path);
+            break;
         }
-        // Check if file is empty (daemon consumed it)
-        match fs::metadata(&send_path) {
-            Ok(m) if m.len() == 0 => {
-                let _ = fs::remove_file(&send_path);
-                return Ok(());
-            }
-            _ => {}
+        if Instant::now() >= deadline {
+            let _ = fs::remove_file(&send_path);
+            anyhow::bail!(
+                "daemon '{}' did not pick up the data within 2s - is it wedged? \
+                 (`emb serial daemon list` shows its state)",
+                id
+            );
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(25));
     }
 
-    // Timeout is not necessarily an error - the daemon might be slow
+    // Taking the file is not the same as putting the bytes on the wire.
+    if let Ok(reason) = fs::read_to_string(&err_path) {
+        let _ = fs::remove_file(&err_path);
+        anyhow::bail!(
+            "daemon '{}' could not write to the port: {}",
+            id,
+            reason.trim()
+        );
+    }
+
     Ok(())
 }
 
@@ -361,13 +441,23 @@ pub fn serve(
     let shutdown_file = shutdown_path(id);
     let hist_path = history_path(id);
 
-    // Open serial port
-    let mut port = serialport::new(port_name, baud_rate)
+    // Open serial port. This is the failure users actually hit (port busy from
+    // another daemon or another program, port gone), and this process's stderr
+    // is NUL - so record the reason where the parent can pick it up, instead of
+    // returning an error nobody ever sees.
+    let mut port = match serialport::new(port_name, baud_rate)
         .data_bits(config.data_bits)
         .parity(config.parity)
         .stop_bits(config.stop_bits)
         .timeout(Duration::from_millis(100))
-        .open()?;
+        .open()
+    {
+        Ok(p) => p,
+        Err(e) => {
+            record_start_error(id, &crate::serial::port::describe_open_error(port_name, &e));
+            return Err(e.into());
+        }
+    };
 
     let running = Arc::new(AtomicBool::new(true));
     let r1 = running.clone();
@@ -379,10 +469,21 @@ pub fn serve(
     });
 
     // Open buffer file in append mode
-    let mut buffer_file = fs::OpenOptions::new()
+    let mut buffer_file = match fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&buf_path)?;
+        .open(&buf_path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            record_start_error(id, &format!("cannot open {}: {e}", buf_path.display()));
+            return Err(e.into());
+        }
+    };
+
+    // Startup is done. The parent is waiting on this to tell "came up" apart
+    // from "died in the first millisecond".
+    let _ = fs::write(ready_path(id), b"\n");
 
     let mut read_buf = vec![0u8; 4096];
 
@@ -396,16 +497,16 @@ pub fn serve(
         if send_path.exists() {
             match fs::read(&send_path) {
                 Ok(data) if !data.is_empty() => {
-                    let send_len = data.len();
-                    if let Err(_e) = port.write_all(&data) {
-                        // Write failed; port might be disconnected
+                    if let Err(e) = port.write_all(&data) {
+                        // The sender is waiting to hear that the bytes went
+                        // out, not merely that we took the file. Say so.
+                        let _ = fs::write(send_error_path(id), format!("{e}\n"));
                     } else {
                         let _ = port.flush();
                         append_history(&hist_path, "send", &data);
                     }
                     // Delete the send file regardless
                     let _ = fs::remove_file(&send_path);
-                    let _ = send_len; // suppress unused warning
                 }
                 Ok(_) => {
                     // Empty file, remove it
@@ -460,6 +561,7 @@ fn write_meta(meta: &DaemonMeta) -> anyhow::Result<()> {
 }
 
 fn read_meta(id: &str) -> anyhow::Result<DaemonMeta> {
+    validate_id(id)?;
     let path = meta_path(id);
     if !path.exists() {
         anyhow::bail!("daemon '{}' not found", id);
@@ -467,6 +569,23 @@ fn read_meta(id: &str) -> anyhow::Result<DaemonMeta> {
     let content = fs::read_to_string(&path)?;
     let meta: DaemonMeta = toml::from_str(&content)?;
     Ok(meta)
+}
+
+/// An id names a directory under the daemons base dir, so it must be a plain
+/// name. Without this, `--id ../somewhere` writes outside that dir - the id
+/// reaches `state_dir()` unchecked.
+fn validate_id(id: &str) -> anyhow::Result<()> {
+    const RESERVED: [char; 9] = ['/', '\\', ':', '*', '?', '"', '<', '>', '|'];
+    if id.is_empty() {
+        anyhow::bail!("daemon id must not be empty");
+    }
+    if id == "." || id == ".." || id.chars().any(|c| RESERVED.contains(&c) || c.is_control()) {
+        anyhow::bail!(
+            "invalid daemon id '{id}': an id is a plain name - no path separators, \
+             drive letters or reserved characters"
+        );
+    }
+    Ok(())
 }
 
 fn update_meta_status(id: &str, status: &str) -> anyhow::Result<()> {
@@ -478,6 +597,11 @@ fn update_meta_status(id: &str, status: &str) -> anyhow::Result<()> {
 fn cleanup_state(id: &str) {
     let sdir = state_dir(id);
     let _ = fs::remove_dir_all(&sdir);
+}
+
+/// Record why a daemon could not come up, for the parent that spawned it.
+fn record_start_error(id: &str, msg: &str) {
+    let _ = fs::write(error_path(id), format!("{msg}\n"));
 }
 
 /// Check if a process with the given PID is alive.
