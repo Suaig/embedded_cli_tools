@@ -1,5 +1,10 @@
 # Embedded CLI Tools (emb) - Design Spec
 
+> 2026-05-14 的初版设计记录，保留当时的思路与取舍；本文档已归档，不作为当前实现依据。
+**更新**: 2026-10-09 · **关联**: `src/keil/`、`skills/keil-dev/` · **状态**: 归档
+
+---
+
 ## 1. Project Overview
 
 A Rust-based CLI tool named `emb` that provides comprehensive embedded development capabilities for AI assistants (primarily Claude Code). The tool enables AI assistants to parse, view, edit Keil projects and STM32CubeMX IOC files, compile/flash firmware, manage serial ports, and debug — all through token-efficient CLI commands.
@@ -107,7 +112,7 @@ Standard XML with schema `project_projx.xsd`. Key sections per `<Target>`:
             <FileName>...</FileName>
             <FileType>...</FileType>       <!-- 1=.c, 2=.s, 5=.h -->
             <FilePath>...</FilePath>
-            <IncludeInBuild>0</IncludeInBuild>  <!-- Present when excluded -->
+            <IncludeInBuild>0</IncludeInBuild>  <!-- WRONG PLACE - see note below -->
           </File>
         </Files>
       </Group>
@@ -115,6 +120,12 @@ Standard XML with schema `project_projx.xsd`. Key sections per `<Target>`:
   </Target>
 </Targets>
 ```
+
+> ⚠️ **修正（2026-10-09）**：上面那行画错了位置。Keil 实际写在
+> `File/FileOption/CommonProperty/IncludeInBuild`（且 Keil 会显式写 `1`，缺失同样表示参与编译；
+> 只有 `0` 是排除）。照本文档实现的 `emb keil file-exclude` 把这个标签写成 `<File>` 的直属子节点，
+> 位置 Keil 根本不看，文件仍在编译。读写两侧均已按真实路径修复：`src/keil/parser.rs` 的
+> `parse_files`、`src/keil/editor.rs` 的 `file_exclude` / `file_include`。
 
 #### .uvmpw (Multi-Project Workspace)
 Simple XML referencing multiple `.uvprojx` files:
