@@ -438,10 +438,17 @@ fn parse_files(group_node: Node) -> Vec<FileEntry> {
         .children()
         .filter(|c| c.has_tag_name("File"))
         .map(|f| {
+            // IncludeInBuild lives at File/FileOption/CommonProperty/IncludeInBuild.
+            // Searching only the direct children of <File> never matched, so every
+            // file was reported as included even with Keil's "include in build"
+            // box cleared - a file that is not compiled at all still showed as
+            // "included". Absent (or "1") means included, which is Keil's default.
             let included = !matches!(
-                f.children()
-                    .find(|c| c.has_tag_name("IncludeInBuild"))
-                    .and_then(|c| c.text()),
+                child(f, "FileOption")
+                    .and_then(|o| child(o, "CommonProperty"))
+                    .and_then(|cp| child(cp, "IncludeInBuild"))
+                    .and_then(|n| n.text())
+                    .map(str::trim),
                 Some("0")
             );
             FileEntry {
@@ -600,6 +607,63 @@ mod tests {
         );
     }
 
+    /// Keil writes the per-file build switch as
+    /// File/FileOption/CommonProperty/IncludeInBuild. Looking for it among the
+    /// direct children of `<File>` never matched, so a file whose "include in
+    /// build" box was cleared was still listed as `included` - as if it were
+    /// compiled. Absent (or a FileOption without the tag) means included, which
+    /// is Keil's default.
+    #[test]
+    fn parses_file_include_in_build_from_common_property() {
+        const XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Project>
+  <SchemaVersion>2.1</SchemaVersion>
+  <Targets>
+    <Target>
+      <TargetName>T</TargetName>
+      <TargetOption><TargetCommonOption><Device>D</Device></TargetCommonOption></TargetOption>
+      <Groups>
+        <Group>
+          <GroupName>G</GroupName>
+          <Files>
+            <File><FileName>plain.c</FileName><FileType>1</FileType><FilePath>plain.c</FilePath></File>
+            <File>
+              <FileName>off.c</FileName><FileType>1</FileType><FilePath>off.c</FilePath>
+              <FileOption><CommonProperty><IncludeInBuild>0</IncludeInBuild></CommonProperty></FileOption>
+            </File>
+            <File>
+              <FileName>on.c</FileName><FileType>1</FileType><FilePath>on.c</FilePath>
+              <FileOption><CommonProperty><IncludeInBuild>1</IncludeInBuild></CommonProperty></FileOption>
+            </File>
+            <File>
+              <FileName>opts.c</FileName><FileType>1</FileType><FilePath>opts.c</FilePath>
+              <FileOption><CommonProperty><RVCTCodeConst>0</RVCTCodeConst></CommonProperty></FileOption>
+            </File>
+          </Files>
+        </Group>
+      </Groups>
+    </Target>
+  </Targets>
+</Project>"#;
+
+        let proj = parse_project(XML).unwrap();
+        let got: Vec<(&str, bool)> = proj.targets[0].groups[0]
+            .files
+            .iter()
+            .map(|f| (f.name.as_str(), f.included_in_build))
+            .collect();
+
+        assert_eq!(
+            got,
+            vec![
+                ("plain.c", true),
+                ("off.c", false),
+                ("on.c", true),
+                ("opts.c", true),
+            ]
+        );
+    }
+
     #[test]
     fn test_parse_minimal_project() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -685,7 +749,11 @@ mod tests {
               <FileName>excluded.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/excluded.c</FilePath>
-              <IncludeInBuild>0</IncludeInBuild>
+              <FileOption>
+                <CommonProperty>
+                  <IncludeInBuild>0</IncludeInBuild>
+                </CommonProperty>
+              </FileOption>
             </File>
           </Files>
         </Group>

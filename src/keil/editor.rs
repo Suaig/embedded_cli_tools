@@ -784,13 +784,17 @@ pub fn file_exclude(
         .ok_or_else(|| anyhow::anyhow!("group '{}' not found", group))?;
     let file_elem = find_file_in_group_mut(group_elem, filename)?;
 
-    // Remove existing IncludeInBuild if present, then add <IncludeInBuild>0</IncludeInBuild>
-    file_elem.children.retain(|c| {
+    // Keil records the per-file build switch at
+    // File/FileOption/CommonProperty/IncludeInBuild. Written as a direct child
+    // of <File> it sits where Keil never looks, so a file "excluded" here
+    // stayed in the build. Put it where Keil puts it.
+    let common = navigate_create(file_elem, &["FileOption", "CommonProperty"]);
+    common.children.retain(|c| {
         c.as_element().map(|e| e.name != "IncludeInBuild").unwrap_or(true)
     });
     let mut iib = Element::new("IncludeInBuild");
     set_element_text(&mut iib, "0");
-    file_elem.children.push(XMLNode::Element(iib));
+    common.children.push(XMLNode::Element(iib));
 
     save_xml(&root, path)?;
     Ok(())
@@ -811,15 +815,23 @@ pub fn file_include(
         .ok_or_else(|| anyhow::anyhow!("group '{}' not found", group))?;
     let file_elem = find_file_in_group_mut(group_elem, filename)?;
 
-    // Remove <IncludeInBuild> to restore default (included)
-    let had = file_elem.children.iter().any(|c| {
-        c.as_element().map(|e| e.name == "IncludeInBuild").unwrap_or(false)
-    });
-    ensure!(had, "file '{}' is already included in build (no <IncludeInBuild> override)", filename);
-
-    file_elem.children.retain(|c| {
-        c.as_element().map(|e| e.name != "IncludeInBuild").unwrap_or(true)
-    });
+    // Mirror of file_exclude: the override lives under FileOption/CommonProperty.
+    // navigate_create() builds that chain if it is missing, but nothing is
+    // written unless the tag was really there - the error below returns before
+    // save_xml, so the in-memory edit is dropped. Keil re-ticks the box by
+    // writing the tag back as 1 rather than dropping it, so do the same.
+    let common = navigate_create(file_elem, &["FileOption", "CommonProperty"]);
+    let idx = common
+        .children
+        .iter()
+        .position(|c| c.as_element().map(|e| e.name == "IncludeInBuild").unwrap_or(false))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "file '{}' is already included in build (no <IncludeInBuild> override)",
+                filename
+            )
+        })?;
+    set_element_text(common.children[idx].as_mut_element().unwrap(), "1");
 
     save_xml(&root, path)?;
     Ok(())
@@ -889,7 +901,11 @@ mod tests {
               <FileName>excluded.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/excluded.c</FilePath>
-              <IncludeInBuild>0</IncludeInBuild>
+              <FileOption>
+                <CommonProperty>
+                  <IncludeInBuild>0</IncludeInBuild>
+                </CommonProperty>
+              </FileOption>
             </File>
           </Files>
         </Group>
@@ -1110,6 +1126,11 @@ mod tests {
 
         let proj = super::super::parser::load_project(path).unwrap();
         assert!(proj.targets[0].groups[0].files[0].included_in_build);
+
+        // Keil re-ticks the box by writing the tag back as 1 instead of dropping
+        // it; the on-disk shape differs between the two, so pin ours to Keil's.
+        let xml = std::fs::read_to_string(path).unwrap();
+        assert!(xml.contains("<IncludeInBuild>1</IncludeInBuild>"));
     }
 
     #[test]
