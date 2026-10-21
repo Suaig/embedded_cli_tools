@@ -107,9 +107,10 @@ pub struct SymbolHit {
 ///     etharp_raw                               0x90035399   Thumb Code   360  etharp.o(.text.etharp_raw)
 /// ```
 ///
-/// Rows are recognised by shape rather than by position, and a line that is
-/// neither blank nor a row ends the table — that is what stops the scan at the
-/// `====` rule before "Memory Map of the image".
+/// Rows are recognised by shape rather than by position. Unrecognised lines
+/// are skipped — armlink puts `- Undefined Weak Reference` entries, which have
+/// no address, at the top of the Global table — and the table ends at the
+/// `====` rule that precedes "Memory Map of the image".
 pub fn parse_map_symbols(text: &str) -> Vec<Symbol> {
     let mut symbols = Vec::new();
     let mut in_table = false;
@@ -135,12 +136,19 @@ pub fn parse_map_symbols(text: &str) -> Vec<Symbol> {
         if t.is_empty() {
             continue;
         }
-        match parse_symbol_line(t) {
-            Some(s) => symbols.push(s),
-            None => {
-                in_table = false;
-                in_rows = false;
-            }
+        // A rule of '=' closes the table.
+        if t.len() >= 3 && t.chars().all(|c| c == '=') {
+            in_table = false;
+            in_rows = false;
+            continue;
+        }
+        // Anything else that does not look like a row is skipped rather than
+        // treated as the end of the table. armlink lists undefined weak
+        // references as `name  - Undefined Weak Reference` with no address, at
+        // the top of the Global table - ending there drops every Global symbol
+        // behind them, which on a real map was all of them (including `main`).
+        if let Some(s) = parse_symbol_line(t) {
+            symbols.push(s);
         }
     }
 
@@ -614,5 +622,58 @@ Memory Map of the image
     fn an_empty_or_symbol_less_map_yields_no_symbols() {
         assert!(parse_map_symbols("").is_empty());
         assert!(parse_map_symbols("  Image Entry point : 0x08000000\n").is_empty());
+    }
+
+    /// armlink opens the Global table with undefined weak references, which
+    /// carry no address. Ending the table at the first line that is not a row
+    /// silently dropped everything behind them — on a real map that was the
+    /// entire Global table, so `main` could not be looked up at all.
+    #[test]
+    fn undefined_weak_references_do_not_end_the_table() {
+        let text = "\
+    Global Symbols
+
+    Symbol Name                              Value     Ov Type        Size  Object(Section)
+
+    __cxa_finalize                            - Undefined Weak Reference
+    __sigvec_lookup                           - Undefined Weak Reference
+    main                                     0x9004de31   Thumb Code   504  main.o(.text.main)
+
+==============================================================================
+
+Memory Map of the image
+";
+        let symbols = parse_map_symbols(text);
+        assert_eq!(symbols.len(), 1, "{symbols:?}");
+        assert_eq!(symbols[0].name, "main");
+        assert_eq!(symbols[0].value, 0x9004_de31);
+    }
+
+    /// The same-address tie in the shape a real map actually produces: the
+    /// Section marker at the function's entry, the function one thumb-bit
+    /// above it.
+    #[test]
+    fn a_global_symbol_beats_a_local_section_marker_at_the_same_address() {
+        let text = "\
+    Local Symbols
+
+    Symbol Name                              Value     Ov Type        Size  Object(Section)
+
+    [Anonymous Symbol]                       0x9004de30   Section        0  main.o(.text.main)
+
+==============================================================================
+
+    Global Symbols
+
+    Symbol Name                              Value     Ov Type        Size  Object(Section)
+
+    main                                     0x9004de31   Thumb Code   504  main.o(.text.main)
+
+==============================================================================
+";
+        let symbols = parse_map_symbols(text);
+        let hit = lookup_symbol(&symbols, 0x9004_DF00).expect("hit");
+        assert_eq!(hit.symbol.name, "main");
+        assert_eq!(hit.offset, 0xD0);
     }
 }
