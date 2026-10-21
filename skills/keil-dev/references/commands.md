@@ -51,23 +51,33 @@ emb keil config-set      <proj> -t <T> key value
 ## 构建 / 烧录
 
 ```
-emb keil build   <proj> [-t <T>] [-p <project>]    # 增量
-emb keil rebuild <proj> [-t <T>] [-p <project>]    # 全量重编译
-emb keil clean   <proj> [-t <T>] [-p <project>]
-emb keil flash   <proj> [-t <T>] [-p <project>]    # Flash Download
+emb keil build   <proj> [-t <T>] [-p <project>] [--timeout S] [--stream]   # 增量
+emb keil rebuild <proj> [-t <T>] [-p <project>] [--timeout S] [--stream]   # 全量重编译
+emb keil clean   <proj> [-t <T>] [-p <project>] [--timeout S]
+emb keil flash   <proj> [-t <T>] [-p <project>] [--timeout S] [--stream]   # Flash Download
 ```
 返回 success / errors / warnings / program_size(Code/RO/RW/ZI) / output_file。UV4 码：0=成功，1=警告，2+=错误。
 
 **失败会返回非零退出码**，stderr 带错误/警告计数与 UV4 日志末尾几行。target 名写错会在调用 UV4 **之前**就被拒掉并列出可用 target，不会白跑一轮编译。
+
+**卡死会自动中止（默认就开）**：UV4 连续 **30 秒零 CPU** 就被判定为卡住并杀掉——`-j0` 只隐藏窗口，挡不住 μVision 弹模态对话框，而对话框会让进程零 CPU 傻等，这正是"编译几分钟没输出"的真相。许可（licence）排队也是同一副景象。`--timeout S` 是额外的墙钟上限，默认 0（不限）——大工程全量重编译本来就要好几分钟，按时间杀是错的。
+
+**`--stream` 把 UV4 日志实时回显到 stderr**（stdout 仍是那张结果表，`--json` 不受影响）。构建日志是 UV4 自己增量写的 `-o` 文件，emb 边等边跟读即可；一次大重编译的日志有几十 KB，所以默认关，只在排查慢/卡的时候开。
+
+**`flash` 会先做探针预检**：读 `.uvoptx` 里该 target 的 `<pMon>`，和 Windows 枚举到的调试器对一下，不一致就在 stderr 打一行警告——不然 UV4 只会给 `Target DLL has been cancelled` / `Internal DLL Error`，既不说是哪个探针也不说实际接的是什么。判定不出来时**不报警**：宁可漏报，也不阻断本来能成功的烧录。
 
 `.uvmpw` 下不带 `-p` 只会构建工作区第一个子项目；要构建别的子项目必须显式 `-p`。
 
 ## map 分析
 
 ```
-emb keil map Objects/STM32H723/STM32H723.map
+emb keil map Objects/STM32H723/STM32H723.map                          # 总量 + 执行区域
+emb keil map .../TX_SlotA.map --lookup 0x90034FCE                     # 地址 → 符号
+emb keil map .../TX_SlotA.map --lookup 0x90034FCE,0x9003FFFF          # 逗号分隔多个
 ```
 输出 ROM/RW/ZI 总量 + 各执行区域。核对内存布局（DTCM/AXI SRAM/D3 SRAM 分配）。
+
+`--lookup` 是 **HardFault 之后第一件要做的事**：把 PC / LR 翻成函数名 + 偏移。两个坑它已经处理：符号在 map 的 **Local Symbols** 段（静态函数不在 Global 段），Thumb 符号值的 bit0 是 1 而 PC 不是（比较前要掩掉）。同一地址上既有函数又有 `[Anonymous Symbol] Section` 标记时取函数。
 
 ## 调试（UV4 -d 脚本化，见 debug.md）
 

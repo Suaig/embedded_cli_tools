@@ -5,6 +5,7 @@
 //!   - Total RO / RW / ROM size (human summary near the end)
 //!   - Image entry point
 //!   - Execution Regions (name, exec/load base, size, max, attributes)
+//!   - The Local and Global symbol tables (for address -> symbol lookup)
 //!
 //! This is a best-effort text scanner: armlink's map format is line-oriented
 //! and stable across MDK releases, so we avoid a full grammar and just pick
@@ -64,6 +65,170 @@ pub struct MapInfo {
     pub entry_point: u64,
     pub totals: MapTotals,
     pub regions: Vec<ExecRegion>,
+}
+
+/// One row of the map's "Local Symbols" / "Global Symbols" table.
+///
+/// armlink splits the table in two: functions and file-scope objects land under
+/// Local Symbols, and only externally visible names reach Global Symbols. A
+/// lookup that read just the Global half would miss almost every function, so
+/// both tables are collected into one list.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Symbol {
+    pub name: String,
+    /// Symbol value. Code symbols are Thumb addresses, so bit 0 is set.
+    pub value: u64,
+    /// `Thumb Code` / `Code` / `Data` / `Number` / `Section` / ...
+    pub kind: String,
+    pub size: u64,
+    /// e.g. `etharp.o(.text.etharp_raw)`; linker-generated entries have no
+    /// parentheses (`anon$$obj.o ABSOLUTE`).
+    pub object: String,
+}
+
+/// The symbol an address falls in, and how far into it the address is.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SymbolHit {
+    pub symbol: Symbol,
+    /// Bytes from the symbol's entry point to the queried address.
+    pub offset: u64,
+}
+
+/// Collect the symbol tables of a Keil .map.
+///
+/// The tables are delimited by a `Local Symbols` / `Global Symbols` heading, a
+/// `Symbol Name ... Object(Section)` column header, then one row per symbol:
+///
+/// ```text
+///     Local Symbols
+///
+///     Symbol Name                              Value     Ov Type        Size  Object(Section)
+///
+///     etharp_raw                               0x90035399   Thumb Code   360  etharp.o(.text.etharp_raw)
+/// ```
+///
+/// Rows are recognised by shape rather than by position, and a line that is
+/// neither blank nor a row ends the table — that is what stops the scan at the
+/// `====` rule before "Memory Map of the image".
+pub fn parse_map_symbols(text: &str) -> Vec<Symbol> {
+    let mut symbols = Vec::new();
+    let mut in_table = false;
+    let mut in_rows = false;
+
+    for line in text.lines() {
+        let t = line.trim();
+
+        if t == "Local Symbols" || t == "Global Symbols" {
+            in_table = true;
+            in_rows = false;
+            continue;
+        }
+        if !in_table {
+            continue;
+        }
+        if !in_rows {
+            if t.starts_with("Symbol Name") {
+                in_rows = true;
+            }
+            continue;
+        }
+        if t.is_empty() {
+            continue;
+        }
+        match parse_symbol_line(t) {
+            Some(s) => symbols.push(s),
+            None => {
+                in_table = false;
+                in_rows = false;
+            }
+        }
+    }
+
+    symbols
+}
+
+/// Parse one symbol row: `name 0xVALUE Type... Size Object(Section)`.
+///
+/// Neither end of the row is fixed-width. The name may contain spaces
+/// (`[Anonymous Symbol]`) and so may the object (`anon$$obj.o ABSOLUTE`), and
+/// the type is one or two tokens (`Thumb Code`). Anchoring on the first `0x`
+/// token fixes the name, and the first all-digit token after it fixes the size.
+/// Rows from "Memory Map of the image" start with `0x` themselves and are
+/// rejected because they leave an empty name.
+fn parse_symbol_line(line: &str) -> Option<Symbol> {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+
+    let value_idx = tokens.iter().position(|t| t.starts_with("0x"))?;
+    if value_idx == 0 {
+        return None;
+    }
+    let name = tokens[..value_idx].join(" ");
+    let value = parse_hex(tokens[value_idx])?;
+
+    let rest = &tokens[value_idx + 1..];
+    let size_idx = rest.iter().position(|t| t.parse::<u64>().is_ok())?;
+    let kind = rest[..size_idx].join(" ");
+    let size = rest[size_idx].parse::<u64>().ok()?;
+    let object = rest[size_idx + 1..].join(" ");
+
+    if kind.is_empty() || object.is_empty() {
+        return None;
+    }
+
+    Some(Symbol {
+        name,
+        value,
+        kind,
+        size,
+        object,
+    })
+}
+
+fn is_code(kind: &str) -> bool {
+    kind == "Code" || kind == "Thumb Code"
+}
+
+/// Find the symbol an address belongs to.
+///
+/// Thumb symbols carry bit 0 in their value and a program counter never does,
+/// so both sides are masked before comparing.
+///
+/// The nearest symbol at or below the address wins. At the *same* address a
+/// code symbol beats the others, because armlink also records a `Section`
+/// marker (`[Anonymous Symbol]`) at every function's entry — without the
+/// tie-break, `0x90035398` answers `[Anonymous Symbol]` instead of
+/// `etharp_raw`. A nearer data symbol is still allowed to win: inside a data
+/// region the honest answer is the data symbol that is actually there, and the
+/// offset column makes it obvious when that is the case.
+pub fn lookup_symbol(symbols: &[Symbol], addr: u64) -> Option<SymbolHit> {
+    let target = addr & !1u64;
+    let mut best: Option<&Symbol> = None;
+
+    for s in symbols {
+        let base = s.value & !1u64;
+        if base > target {
+            continue;
+        }
+        let better = match best {
+            None => true,
+            Some(b) => {
+                let best_base = b.value & !1u64;
+                if base != best_base {
+                    base > best_base
+                } else {
+                    is_code(&s.kind) && !is_code(&b.kind)
+                }
+            }
+        };
+        if better {
+            best = Some(s);
+        }
+    }
+
+    best.map(|s| SymbolHit {
+        offset: target - (s.value & !1u64),
+        symbol: s.clone(),
+    })
 }
 
 /// Parse a Keil .map file from disk.
@@ -145,7 +310,7 @@ pub fn parse_map_text(text: &str) -> MapInfo {
 }
 
 /// Parse a hex token like "0x08000000" or "08000000".
-fn parse_hex(s: &str) -> Option<u64> {
+pub fn parse_hex(s: &str) -> Option<u64> {
     let s = s.trim().trim_start_matches("0x").trim_start_matches("0X");
     u64::from_str_radix(s, 16).ok()
 }
@@ -334,5 +499,120 @@ mod tests {
         assert_eq!(dtcm.exec_base, 0x2000_0000);
         assert_eq!(dtcm.load_base, 0x080a_6fe4);
         assert_eq!(dtcm.attr, "ABSOLUTE, COMPRESSED[0x00000204]");
+    }
+
+    /// Rows copied verbatim from a real map
+    /// (`MDK-ARM/Listings/TX_SlotA.map`), including the two that are easy to
+    /// get wrong: `[Anonymous Symbol]` (a name with a space) and
+    /// `anon$$obj.o ABSOLUTE` (an object with a space and no parentheses).
+    const SYMBOL_TABLES: &str = "\
+    Local Symbols
+
+    Symbol Name                              Value     Ov Type        Size  Object(Section)
+
+    etharp_raw                               0x90035399   Thumb Code   360  etharp.o(.text.etharp_raw)
+    [Anonymous Symbol]                       0x90035398   Section        0  etharp.o(.text.etharp_raw)
+    etharp_input                             0x90035001   Thumb Code   296  etharp.o(.text.etharp_input)
+    .L.str                                   0x90040000   Data          12  etharp.o(.rodata.str1.1)
+
+==============================================================================
+
+    Global Symbols
+
+    Symbol Name                              Value     Ov Type        Size  Object(Section)
+
+    Image$$ER_SYS_INIT$$Base                 0x90092948   Number         0  anon$$obj.o ABSOLUTE
+    lwip_htons                               0x90030001   Thumb Code    24  def.o(.text.lwip_htons)
+
+==============================================================================
+
+Memory Map of the image
+
+    Image Entry point : 0x90001000
+    Execution Region ER_IROM1 (Exec base: 0x90001000, Load base: 0x90001000, Size: 0x000a6fe4, Max: 0x00100000, ABSOLUTE)
+    0x90035398   0x90035398   0x00000168   Code   RO         5008    .text.etharp_raw    etharp.o
+";
+
+    fn symbol<'a>(symbols: &'a [Symbol], name: &str) -> &'a Symbol {
+        symbols
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("no symbol named {name} in {:?}", symbols.len()))
+    }
+
+    /// A function is usually only in the Local table, so reading the Global
+    /// half alone would answer "not found" for most addresses.
+    #[test]
+    fn symbols_are_collected_from_both_tables() {
+        let symbols = parse_map_symbols(SYMBOL_TABLES);
+        assert_eq!(symbols.len(), 6, "{symbols:?}");
+
+        let raw = symbol(&symbols, "etharp_raw");
+        assert_eq!(raw.value, 0x9003_5399);
+        assert_eq!(raw.kind, "Thumb Code");
+        assert_eq!(raw.size, 360);
+        assert_eq!(raw.object, "etharp.o(.text.etharp_raw)");
+
+        let anon = symbol(&symbols, "[Anonymous Symbol]");
+        assert_eq!(anon.kind, "Section");
+
+        let base = symbol(&symbols, "Image$$ER_SYS_INIT$$Base");
+        assert_eq!(base.object, "anon$$obj.o ABSOLUTE");
+        assert_eq!(base.size, 0);
+
+        assert!(symbols.iter().all(|s| !s.name.is_empty()));
+    }
+
+    /// "Memory Map of the image" rows start with the address, which leaves the
+    /// name column empty — the shape test that keeps them out of the table.
+    #[test]
+    fn memory_map_rows_are_not_symbols() {
+        let symbols = parse_map_symbols(SYMBOL_TABLES);
+        assert!(
+            !symbols.iter().any(|s| s.object.starts_with(".text.etharp_raw ")),
+            "{symbols:?}"
+        );
+    }
+
+    #[test]
+    fn lookup_lands_on_the_function_the_address_is_inside() {
+        let symbols = parse_map_symbols(SYMBOL_TABLES);
+        let hit = lookup_symbol(&symbols, 0x9003_53F0).expect("hit");
+        assert_eq!(hit.symbol.name, "etharp_raw");
+        assert_eq!(hit.offset, 0x58);
+    }
+
+    /// The Section marker sits at the function's entry address, so the two
+    /// collide at offset 0 and the code symbol has to win.
+    #[test]
+    fn a_section_marker_does_not_shadow_the_function_at_the_same_address() {
+        let symbols = parse_map_symbols(SYMBOL_TABLES);
+        let hit = lookup_symbol(&symbols, 0x9003_5398).expect("hit");
+        assert_eq!(hit.symbol.name, "etharp_raw");
+        assert_eq!(hit.offset, 0);
+    }
+
+    /// Thumb values carry bit 0; a PC never does. Without masking, looking up
+    /// the function's own entry point reports an offset of 1.
+    #[test]
+    fn the_thumb_bit_does_not_shift_the_offset() {
+        let symbols = parse_map_symbols(SYMBOL_TABLES);
+        for addr in [0x9003_5398, 0x9003_5399] {
+            let hit = lookup_symbol(&symbols, addr).expect("hit");
+            assert_eq!(hit.symbol.name, "etharp_raw", "at {addr:#x}");
+            assert_eq!(hit.offset, 0, "at {addr:#x}");
+        }
+    }
+
+    #[test]
+    fn lookup_below_every_symbol_reports_nothing() {
+        let symbols = parse_map_symbols(SYMBOL_TABLES);
+        assert!(lookup_symbol(&symbols, 0x0000_0100).is_none());
+    }
+
+    #[test]
+    fn an_empty_or_symbol_less_map_yields_no_symbols() {
+        assert!(parse_map_symbols("").is_empty());
+        assert!(parse_map_symbols("  Image Entry point : 0x08000000\n").is_empty());
     }
 }

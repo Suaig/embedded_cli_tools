@@ -57,6 +57,48 @@ pub struct DaemonMeta {
     pub pid: u32,
     pub started_at: String,
     pub status: String,
+    /// Unix seconds at start. `started_at` is a locale-formatted string that
+    /// cannot be subtracted from, but `list` has to report the TTL that is
+    /// left. `#[serde(default)]` keeps meta.toml files written before this
+    /// field existed readable.
+    #[serde(default)]
+    pub started_unix: u64,
+    /// Hard lifetime cap in seconds; the daemon exits once it is reached.
+    #[serde(default)]
+    pub ttl_secs: Option<u64>,
+    /// Exit after this many seconds with no `send`/`read`/`poke` from another
+    /// emb command and no bytes arriving from the port.
+    #[serde(default)]
+    pub idle_timeout_secs: Option<u64>,
+}
+
+impl DaemonMeta {
+    /// One-line summary of the daemon's limits, for `daemon list`.
+    ///
+    /// A running daemon reports the TTL that is *left*, because the question
+    /// the column answers is "do I still have time before this thing goes
+    /// away on its own".
+    pub fn limits_display(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+
+        if let Some(ttl) = self.ttl_secs {
+            if self.status == "running" && self.started_unix > 0 {
+                let elapsed = now_unix().saturating_sub(self.started_unix);
+                parts.push(format!("ttl {}s left", ttl.saturating_sub(elapsed)));
+            } else {
+                parts.push(format!("ttl {ttl}s"));
+            }
+        }
+        if let Some(idle) = self.idle_timeout_secs {
+            parts.push(format!("idle {idle}s"));
+        }
+
+        if parts.is_empty() {
+            "-".to_string()
+        } else {
+            parts.join(", ")
+        }
+    }
 }
 
 /// A single history entry for send/receive events.
@@ -132,11 +174,39 @@ fn history_path(id: &str) -> PathBuf {
     state_dir(id).join("history.jsonl")
 }
 
+/// Touched by every command that talks to a daemon, so the daemon can tell
+/// "another emb command is still driving me" from "I was started and left
+/// behind" — the state that leaves the port locked with no obvious cause.
+fn activity_path(id: &str) -> PathBuf {
+    state_dir(id).join("activity")
+}
+
+/// Record that a parent command just used this daemon.
+///
+/// Best-effort: a failed touch only means an idle timeout may fire a little
+/// early, which is not worth failing the command over.
+fn touch_activity(id: &str) {
+    let _ = fs::write(activity_path(id), b"");
+}
+
+/// Seconds since the Unix epoch.
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 // ---------------------------------------------------------------------------
 // Public API: start / list / send / read / stop
 // ---------------------------------------------------------------------------
 
 /// Start a serial daemon by spawning a background `emb` process.
+///
+/// `ttl_secs` caps the daemon's lifetime outright; `idle_timeout_secs` ends it
+/// once nothing has used it for that long. Both exist because a forgotten
+/// daemon holds the port, and every later operation then fails with a message
+/// about the port rather than about the daemon.
 ///
 /// Returns the daemon ID on success.
 pub fn start(
@@ -144,6 +214,8 @@ pub fn start(
     baud_rate: u32,
     id: Option<&str>,
     config: &SerialConfig,
+    ttl_secs: Option<u64>,
+    idle_timeout_secs: Option<u64>,
 ) -> anyhow::Result<String> {
     let daemon_id = match id {
         Some(custom) => {
@@ -184,23 +256,30 @@ pub fn start(
     // spawn_detached, not Command::spawn: std's Windows Command cannot restrict
     // handle inheritance, so the detached daemon would inherit and keep holding
     // whatever pipe our caller attached to us. See src/serial/spawn.rs.
-    let pid = super::spawn::spawn_detached(
-        &exe,
-        &[
-            "--internal-daemon".to_string(),
-            daemon_id.clone(),
-            "--port".to_string(),
-            port_name.to_string(),
-            "--baud".to_string(),
-            baud_rate.to_string(),
-            "--data-bits".to_string(),
-            data_bits_str,
-            "--parity".to_string(),
-            parity_str.to_string(),
-            "--stop-bits".to_string(),
-            stop_bits_str,
-        ],
-    )?;
+    let mut child_args: Vec<String> = vec![
+        "--internal-daemon".to_string(),
+        daemon_id.clone(),
+        "--port".to_string(),
+        port_name.to_string(),
+        "--baud".to_string(),
+        baud_rate.to_string(),
+        "--data-bits".to_string(),
+        data_bits_str,
+        "--parity".to_string(),
+        parity_str.to_string(),
+        "--stop-bits".to_string(),
+        stop_bits_str,
+    ];
+    if let Some(ttl) = ttl_secs {
+        child_args.push("--ttl".to_string());
+        child_args.push(ttl.to_string());
+    }
+    if let Some(idle) = idle_timeout_secs {
+        child_args.push("--idle-timeout".to_string());
+        child_args.push(idle.to_string());
+    }
+
+    let pid = super::spawn::spawn_detached(&exe, &child_args)?;
 
     // Write initial metadata
     let meta = DaemonMeta {
@@ -213,6 +292,9 @@ pub fn start(
         pid,
         started_at: chrono_now(),
         status: "running".to_string(),
+        started_unix: now_unix(),
+        ttl_secs,
+        idle_timeout_secs,
     };
     write_meta(&meta)?;
 
@@ -277,8 +359,9 @@ pub fn list() -> anyhow::Result<Vec<DaemonMeta>> {
         }
         match read_meta(&id) {
             Ok(mut meta) => {
-                // Update status based on whether process is alive
-                if !is_process_alive(meta.pid) {
+                // A daemon that ended on its own records why ("stopped (ttl)").
+                // Only replace the generic "running" left behind by a crash.
+                if !is_process_alive(meta.pid) && meta.status == "running" {
                     meta.status = "stopped".to_string();
                 }
                 result.push(meta);
@@ -296,7 +379,7 @@ pub fn send(id: &str, data: &[u8]) -> anyhow::Result<()> {
     if !is_process_alive(meta.pid) {
         anyhow::bail!("daemon '{}' is not running (PID {})", id, meta.pid);
     }
-
+    touch_activity(id);
     let send_path = send_data_path(id);
     let err_path = send_error_path(id);
     let _ = fs::remove_file(&err_path); // a previous failure is not this one
@@ -344,6 +427,7 @@ pub fn send(id: &str, data: &[u8]) -> anyhow::Result<()> {
 pub fn read(id: &str) -> anyhow::Result<Vec<u8>> {
     // A missing state directory means the id is wrong, not that there is no data.
     read_meta(id)?;
+    touch_activity(id);
 
     let buf_path = buffer_path(id);
     if !buf_path.exists() {
@@ -360,10 +444,34 @@ pub fn read(id: &str) -> anyhow::Result<Vec<u8>> {
     Ok(data)
 }
 
+/// Write bytes and collect the reply in one call.
+///
+/// `send` and then `read` cannot express "put this byte on the wire and wait
+/// 50 ms for the answer": each opens the port on its own, and the gap between
+/// them is whatever the shell costs. Protocol handshakes need the write and the
+/// wait to be one operation — the STM32 ROM bootloader's `0x7F` sync, which
+/// only acknowledges inside a narrow window, is what motivated this.
+///
+/// Anything already buffered is dropped first, so a byte that arrived after the
+/// previous `--wait` expired cannot be mistaken for this reply.
+pub fn poke(id: &str, data: &[u8], wait_ms: u64) -> anyhow::Result<Vec<u8>> {
+    // Validate the id (and the daemon's liveness, via send) before clearing.
+    read_meta(id)?;
+    fs::write(buffer_path(id), [])?;
+
+    send(id, data)?;
+    if wait_ms > 0 {
+        std::thread::sleep(Duration::from_millis(wait_ms));
+    }
+
+    read(id)
+}
+
 /// List history entries for a daemon.
 pub fn history(id: &str, limit: Option<usize>) -> anyhow::Result<Vec<HistoryEntry>> {
     // A missing state directory means the id is wrong, not that there is no history.
     read_meta(id)?;
+    touch_activity(id);
 
     let hist_path = history_path(id);
     if !hist_path.exists() {
@@ -387,6 +495,7 @@ pub fn history(id: &str, limit: Option<usize>) -> anyhow::Result<Vec<HistoryEntr
 pub fn history_clear(id: &str) -> anyhow::Result<()> {
     // A missing state directory means the id is wrong, not that there is no history.
     read_meta(id)?;
+    touch_activity(id);
 
     let hist_path = history_path(id);
     if hist_path.exists() {
@@ -438,6 +547,8 @@ pub fn serve(
     port_name: &str,
     baud_rate: u32,
     config: &SerialConfig,
+    ttl_secs: Option<u64>,
+    idle_timeout_secs: Option<u64>,
 ) -> anyhow::Result<()> {
     let sdir = state_dir(id);
     if !sdir.exists() {
@@ -448,6 +559,7 @@ pub fn serve(
     let send_path = send_data_path(id);
     let shutdown_file = shutdown_path(id);
     let hist_path = history_path(id);
+    let activity_file = activity_path(id);
 
     // Open serial port. This is the failure users actually hit (port busy from
     // another daemon or another program, port gone), and this process's stderr
@@ -493,12 +605,44 @@ pub fn serve(
     // from "died in the first millisecond".
     let _ = fs::write(ready_path(id), b"\n");
 
+    let started = Instant::now();
+    // "Activity" is another emb command using this daemon (which touches the
+    // `activity` file) or bytes arriving from the port. Time spent sitting on
+    // an idle port is exactly what the idle timeout is there to reclaim.
+    let mut last_activity = std::time::SystemTime::now();
+    let mut exit_reason = "stopped";
+
     let mut read_buf = vec![0u8; 4096];
 
     while r2.load(Ordering::SeqCst) {
         // Check for shutdown signal
         if shutdown_file.exists() {
             break;
+        }
+
+        if let Some(ttl) = ttl_secs {
+            if started.elapsed().as_secs() >= ttl {
+                exit_reason = "stopped (ttl)";
+                break;
+            }
+        }
+
+        if let Some(idle) = idle_timeout_secs {
+            if let Ok(meta) = fs::metadata(&activity_file) {
+                if let Ok(touched) = meta.modified() {
+                    if touched > last_activity {
+                        last_activity = touched;
+                    }
+                }
+            }
+            let quiet = std::time::SystemTime::now()
+                .duration_since(last_activity)
+                .map(|d| d.as_secs() >= idle)
+                .unwrap_or(false);
+            if quiet {
+                exit_reason = "stopped (idle)";
+                break;
+            }
         }
 
         // Check for data to send
@@ -512,6 +656,7 @@ pub fn serve(
                     } else {
                         let _ = port.flush();
                         append_history(&hist_path, "send", &data);
+                        last_activity = std::time::SystemTime::now();
                     }
                     // Delete the send file regardless
                     let _ = fs::remove_file(&send_path);
@@ -534,6 +679,7 @@ pub fn serve(
                 }
                 let _ = buffer_file.flush();
                 append_history(&hist_path, "recv", &read_buf[..n]);
+                last_activity = std::time::SystemTime::now();
                 // Prune history if it exceeds the size limit
                 let _ = prune_history_if_needed(&hist_path);
                 let _ = trim_buffer_if_needed(&buf_path);
@@ -553,7 +699,7 @@ pub fn serve(
 
     // Graceful cleanup
     let _ = fs::remove_file(&shutdown_file);
-    let _ = update_meta_status(id, "stopped");
+    let _ = update_meta_status(id, exit_reason);
 
     Ok(())
 }
@@ -797,5 +943,71 @@ mod tests {
         let expected = (BUFFER_MAX_SIZE / 2) as usize;
         assert_eq!(kept.len(), expected);
         assert_eq!(kept, &data[total - expected..], "must keep the newest bytes");
+    }
+
+    fn meta(ttl: Option<u64>, idle: Option<u64>) -> DaemonMeta {
+        DaemonMeta {
+            id: "t".into(),
+            port_name: "COM5".into(),
+            baud_rate: 115200,
+            data_bits: 8,
+            parity: "none".into(),
+            stop_bits: 1,
+            pid: 1,
+            started_at: "-".into(),
+            status: "running".into(),
+            started_unix: now_unix(),
+            ttl_secs: ttl,
+            idle_timeout_secs: idle,
+        }
+    }
+
+    #[test]
+    fn a_daemon_without_limits_says_so() {
+        assert_eq!(meta(None, None).limits_display(), "-");
+    }
+
+    /// The column exists to answer "how long before this thing disappears on
+    /// its own", so a running daemon reports what is left, not what was set.
+    #[test]
+    fn a_running_daemon_reports_the_ttl_it_has_left() {
+        let shown = meta(Some(120), None).limits_display();
+        let left: u64 = shown
+            .trim_start_matches("ttl ")
+            .trim_end_matches("s left")
+            .parse()
+            .unwrap_or_else(|_| panic!("unexpected format: {shown}"));
+        assert!((119..=120).contains(&left), "{shown}");
+    }
+
+    /// A daemon that ended has no time left to report, so it shows its setting.
+    #[test]
+    fn a_stopped_daemon_reports_the_configured_limits() {
+        let mut m = meta(Some(120), Some(30));
+        m.status = "stopped (ttl)".into();
+        assert_eq!(m.limits_display(), "ttl 120s, idle 30s");
+    }
+
+    /// A state directory outlives an emb upgrade, so a meta.toml written before
+    /// the limit fields existed has to keep working — and has to stay readable
+    /// as "no limits" rather than being rejected.
+    #[test]
+    fn metadata_written_before_the_limit_fields_existed_still_loads() {
+        let text = "\
+id = \"abc\"
+port_name = \"COM5\"
+baud_rate = 115200
+data_bits = 8
+parity = \"none\"
+stop_bits = 1
+pid = 1234
+started_at = \"whatever\"
+status = \"running\"
+";
+        let m: DaemonMeta = toml::from_str(text).unwrap();
+        assert_eq!(m.ttl_secs, None);
+        assert_eq!(m.idle_timeout_secs, None);
+        assert_eq!(m.started_unix, 0);
+        assert_eq!(m.limits_display(), "-");
     }
 }

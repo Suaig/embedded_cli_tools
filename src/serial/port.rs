@@ -164,11 +164,33 @@ pub fn describe_open_error(port_name: &str, err: &serialport::Error) -> String {
     if matches!(err.kind(), serialport::ErrorKind::NoDevice) {
         msg.push_str(
             " - either no such port, or something else already holds it (a running \
-             `emb serial daemon`, Keil, or a serial terminal); `emb serial scan` \
-             lists what is available",
+             `emb serial daemon`, Keil, or a serial terminal)",
         );
+        // Port names drift: the CH340 that was COM20 last week is COM5 today,
+        // and a stale name costs a round of guessing every time. Listing what
+        // is actually attached turns that into a one-line fix.
+        let present = present_ports_hint(port_name);
+        if !present.is_empty() {
+            msg.push_str(&format!("; ports present: {present}"));
+        }
     }
     msg
+}
+
+/// "COM3 (Intel ...), COM5 (USB-SERIAL CH340)", excluding the port asked for.
+fn present_ports_hint(port_name: &str) -> String {
+    let Ok(ports) = scan() else {
+        return String::new();
+    };
+    ports
+        .iter()
+        .filter(|p| !p.name.eq_ignore_ascii_case(port_name))
+        .map(|p| match p.description.as_deref() {
+            Some(d) if !d.is_empty() => format!("{} ({})", p.name, d),
+            _ => p.name.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Send data to a serial port (open, send, close).

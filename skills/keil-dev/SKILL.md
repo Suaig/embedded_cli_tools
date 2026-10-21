@@ -31,8 +31,8 @@ description: Keil MDK 嵌入式工程（.uvprojx / .uvmpw）的完整开发—�
 **1. 改 .uvprojx 的值，用 locate+Edit，不要 Read 全文。**
 `.uvprojx` 是 3000+ 行 XML，Read 全文 ~37000 token。`emb keil locate` 给你行号 + 原始片段，Read 那几行 + Edit 替换，上下文开销约为全读的 **1/300**，且不破坏 XML 格式。这条是本 skill 省 token 的核心，务必走。详见 editing.md。
 
-**2. editor 命令（file-add / group-add 等）会破坏 XML 格式。**
-editor 底层用 xmltree，会重排属性、丢 `xsi:` 前缀、删空行。Keil 能正常编译，但 `git diff` 噪音巨大。所以判断标准很简单：**改值 → locate+Edit；增删整节点 → editor**。详见 editing.md。
+**2. 除 `file-add` 外的 editor 命令会破坏 XML 格式。**
+`group-add` / `file-remove` / `defines-add` 等底层用 xmltree，会重排属性、丢 `xsi:` 前缀、删空行。Keil 能正常编译，但 `git diff` 噪音巨大；`file-add` 已改成按缩进做文本插入，diff 就只有新增的那几行。判断标准：**改值 → locate+Edit；增删整节点 → editor**。详见 editing.md。
 
 **3. debug keil 是批处理，不是实时交互。**
 `emb debug keil` 跑一段 .ini 脚本（RESET → 读/dump → EXIT）拿结果，不是「敲一步、执行一步、停下等下一条」。要实时交互单步（像 IDE 那样），用 **openocd-debug** skill（openocd + gdb）。两者调试同一个 `.axf`，互补。详见 debug.md。
@@ -40,7 +40,8 @@ editor 底层用 xmltree，会重排属性、丢 `xsi:` 前缀、删空行。Kei
 ## 关键陷阱（高频踩坑）
 
 - `emb keil locate` 返回 `start_line`，Read 时 **offset 直接填 start_line**（它是 1-based 起始行号，**不要减 1**）。
-- `emb debug keil` 每次会**下载 flash + halt CPU**（工程 `UpdateFlashBeforeDebugging=1` 时），耗时。
+- `emb debug keil` 每次会**下载 flash + halt CPU**（工程 `UpdateFlashBeforeDebugging=1` 时），耗时。只想读寄存器、不想冲掉正在跑的固件就加 **`--no-download`**（临时清下载开关，跑完还原）。
+- 没有探针时 UV4 只给一句 `Target DLL has been cancelled`。emb 会在失败后补充"工程配的是哪种探针、本机检测到几个"；`flash` 则在调用前比对并警告。
 - `--run-to` / 裸运行后断点没命中，程序一直跑，靠 `--timeout` 兜底（exit 124）。断点用具体函数名/地址。
 - 多 target 工程 `-t <T>` 必填，否则操作第一个 target。
 - emb 找 UV4 顺序：`emb config keil_path` > 环境变量 > `C:\Keil_v5` > 扫描 Program Files。非标准安装位置配一次 config 即全局生效（build/flash/debug 都读它）。

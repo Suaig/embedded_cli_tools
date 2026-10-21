@@ -3,9 +3,11 @@
 //! Flow per invocation:
 //!   1. build a temp .ini (RESET + LOG > dump + printf reads + LOG OFF + EXIT)
 //!   2. patch <tIfile> in the matching target's <DebugOpt> in .uvoptx
-//!   3. run `UV4 -d -j0 -t <target> <proj> -o log` with a timeout
-//!   4. ALWAYS restore <tIfile> to its original value
-//!   5. read the dump file, strip command echoes, return
+//!   3. with --no-download, also clear <UpdateFlashBeforeDebugging> for that
+//!      target (.uvprojx, Utilities/Flash1)
+//!   4. run `UV4 -d -j0 -t <target> <proj> -o log` with a timeout
+//!   5. ALWAYS restore every field patched in 2 and 3
+//!   6. read the dump file, strip command echoes, return
 //!
 //! This is batch-mode (one .ini runs to completion then exits). It is NOT an
 //! interactive step-by-step debugger — for that use openocd + gdb.
@@ -29,6 +31,11 @@ pub struct DebugArgs {
     pub ini: Option<PathBuf>,
     pub timeout: u64,
     pub no_reset: bool,
+    /// Leave the target's flash alone: read registers/memory from whatever is
+    /// already running instead of reprogramming it. Implemented by clearing
+    /// the project's own download flags for the duration of the session, since
+    /// UV4 has no command-line switch for it.
+    pub no_download: bool,
 }
 
 pub struct DebugResult {
@@ -67,7 +74,37 @@ pub fn run(
         .with_context(|| format!("read {}", uvoptx.display()))?;
     let ini_abs = std::path::absolute(&ini_path)?;
     let ini_str = path_str(&ini_abs);
-    let (patched, orig_tifile) = patch_tifile(&orig_text, target, &ini_str)?;
+    let (patched, orig_tifile) = patch_tag(&orig_text, target, "tIfile", &ini_str)?;
+    let Some(orig_tifile) = orig_tifile else {
+        bail!("target '{}' or its <tIfile> not found in .uvoptx", target);
+    };
+
+    // 2a. --no-download: <UpdateFlashBeforeDebugging> is "Update target before
+    //     Debugging" (Utilities tab) and it lives in the .uvprojx, not the
+    //     .uvoptx. UV4 has no command-line switch for it, so it is cleared here
+    //     and restored below, exactly like <tIfile>.
+    //
+    //     <tLdApp> ("Load Application at Startup") is deliberately left alone:
+    //     measured on this project it does NOT gate the download (it still
+    //     erased and programmed with tLdApp=0), but turning it off does drop
+    //     the symbol table - `BS main` then fails with "undefined identifier",
+    //     which silently breaks --break / --run-to.
+    let orig_project_flag: Option<String> = if args.no_download {
+        let proj_text = std::fs::read_to_string(proj)
+            .with_context(|| format!("read {}", proj.display()))?;
+        let (patched_proj, orig_flag) =
+            patch_tag(&proj_text, target, "UpdateFlashBeforeDebugging", "0")?;
+        match orig_flag {
+            Some(orig) => {
+                std::fs::write(proj, &patched_proj)
+                    .with_context(|| format!("write {}", proj.display()))?;
+                Some(orig)
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
     std::fs::write(&uvoptx, &patched)
         .with_context(|| format!("write {}", uvoptx.display()))?;
 
@@ -75,16 +112,24 @@ pub fn run(
     let log_path = tmp.path().join("emb_uv4.log");
     let run_res = run_uv4_debug(&uv4, proj, target, &log_path, args.timeout);
 
-    // 4. ALWAYS restore <tIfile> (Keil may have rewritten other fields, so
-    //    re-read the current text and only replace the tIfile node)
+    // 4. ALWAYS restore what was patched (Keil may have rewritten other fields,
+    //    so re-read the current text and only replace the nodes we touched)
     let restore_text = std::fs::read_to_string(&uvoptx).unwrap_or_else(|_| patched.clone());
-    match restore_tifile(&restore_text, target, &orig_tifile) {
+    let restored = restore_tag(&restore_text, target, "tIfile", &orig_tifile);
+    match restored {
         Ok(r) => {
             let _ = std::fs::write(&uvoptx, &r);
         }
         Err(_) => {
             // last-resort: put back the exact bytes we read before patching
             let _ = std::fs::write(&uvoptx, &orig_text);
+        }
+    }
+
+    if let Some(orig) = &orig_project_flag {
+        let current = std::fs::read_to_string(proj).unwrap_or_default();
+        if let Ok(back) = restore_tag(&current, target, "UpdateFlashBeforeDebugging", orig) {
+            let _ = std::fs::write(proj, back);
         }
     }
 
@@ -126,10 +171,14 @@ fn build_ini(args: &DebugArgs, dump_path: &Path) -> String {
         l.push(format!("BS {}", b));
     }
     if let Some(rt) = &args.run_to {
-        // temp breakpoint, run to it, then clear it
-        l.push(format!("BS {}", rt));
-        l.push("G".into());
-        l.push(format!("BC {}", rt));
+        // `G start,stop` runs with a *temporary* breakpoint at `stop`.
+        //
+        // Do not rewrite this as BS/G/BC: on a real target the breakpoint put
+        // in the list with BS was never hit (a BS at `main`, or at an ITCM
+        // function, ran for the full timeout), while `G ,main` stopped at main
+        // immediately. A breakpoint that silently never fires is worse than no
+        // breakpoint at all, so the working form is the one used here.
+        l.push(format!("G ,{}", rt));
     }
     if let Some(n) = args.step {
         for _ in 0..n {
@@ -201,46 +250,70 @@ fn parse_addr(s: &str) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
-// .uvoptx <tIfile> patch / restore
+// .uvoptx / .uvprojx field patch / restore
 // ---------------------------------------------------------------------------
 
-fn patch_tifile(text: &str, target: &str, new_value: &str) -> Result<(String, String)> {
+/// Replace `<tag>…</tag>` inside `target`'s `<Target>` block.
+///
+/// Returns the new text plus the value that was there before, so the caller can
+/// put it back. `None` means the tag is not present at all — nothing was
+/// changed, and there is nothing to restore.
+///
+/// The edit is a byte-range replacement on the original text rather than a
+/// re-serialisation: a debug session must not leave a thousands-of-lines
+/// `git diff` behind in a file the user only asked emb to read.
+fn patch_tag(
+    text: &str,
+    target: &str,
+    tag: &str,
+    new_value: &str,
+) -> Result<(String, Option<String>)> {
     let doc = Document::parse(text)?;
-    let node = find_target_tifile(&doc, target)?;
+    let target_node = find_target(&doc, target)?;
+
+    let Some(node) = walk(target_node, tag) else {
+        return Ok((text.to_string(), None));
+    };
+
     let orig = node.text().unwrap_or("").to_string();
     let range = node.range();
     let mut s = text.to_string();
-    s.replace_range(range.start..range.end, &format!("<tIfile>{}</tIfile>", new_value));
-    Ok((s, orig))
+    s.replace_range(range.start..range.end, &format!("<{tag}>{new_value}</{tag}>"));
+    Ok((s, Some(orig)))
 }
 
-fn restore_tifile(text: &str, target: &str, orig: &str) -> Result<String> {
-    let doc = Document::parse(text)?;
-    let node = find_target_tifile(&doc, target)?;
-    let range = node.range();
-    let mut s = text.to_string();
-    s.replace_range(range.start..range.end, &format!("<tIfile>{}</tIfile>", orig));
-    Ok(s)
+fn restore_tag(text: &str, target: &str, tag: &str, orig: &str) -> Result<String> {
+    Ok(patch_tag(text, target, tag, orig)?.0)
 }
 
-fn find_target_tifile<'a, 'input>(
-    doc: &'a Document<'input>,
-    target: &str,
-) -> Result<Node<'a, 'input>> {
-    let root = doc.root_element();
-    for t in root.children().filter(|c| c.has_tag_name("Target")) {
-        let name = t
-            .children()
-            .find(|c| c.has_tag_name("TargetName"))
-            .and_then(|n| n.text())
-            .unwrap_or("");
-        if name == target {
-            if let Some(n) = walk(t, "tIfile") {
-                return Ok(n);
+/// Find the `<Target>` element whose `<TargetName>` is `target`.
+///
+/// `<Target>` is a direct child of the root in a .uvoptx but sits under
+/// `<Targets>` in a .uvprojx, so this has to recurse rather than scan one level.
+fn find_target<'a, 'input>(doc: &'a Document<'input>, target: &str) -> Result<Node<'a, 'input>> {
+    fn search<'a, 'input>(node: Node<'a, 'input>, target: &str) -> Option<Node<'a, 'input>> {
+        if node.has_tag_name("Target") {
+            let name = node
+                .children()
+                .find(|c| c.has_tag_name("TargetName"))
+                .and_then(|n| n.text())
+                .unwrap_or("");
+            if name == target {
+                return Some(node);
             }
         }
+        for child in node.children().filter(|c| c.is_element()) {
+            if let Some(found) = search(child, target) {
+                return Some(found);
+            }
+        }
+        None
     }
-    bail!("target '{}' or its <tIfile> not found in .uvoptx", target)
+
+    match search(doc.root_element(), target) {
+        Some(n) => Ok(n),
+        None => bail!("target '{}' not found in the project options file", target),
+    }
 }
 
 fn walk<'a, 'input>(node: Node<'a, 'input>, tag: &str) -> Option<Node<'a, 'input>> {
@@ -370,5 +443,143 @@ mod tests {
         assert!(t.contains("line 11"), "{t}");
         assert!(!t.contains("line 10\n"), "{t}");
         assert!(t.ends_with("line 30"), "{t}");
+    }
+
+    /// `.uvoptx` shape: `<Target>` is a direct child of the root.
+    const UVOPTX: &str = "\
+<ProjectOpt>
+  <SchemaVersion>1.1</SchemaVersion>
+  <Target>
+    <TargetName>TX_SlotA</TargetName>
+    <DebugOpt>
+      <tIfile>..\\LinkScript\\Debug_script.ini</tIfile>
+      <tLdApp>1</tLdApp>
+    </DebugOpt>
+  </Target>
+  <Target>
+    <TargetName>TX_SlotB</TargetName>
+    <DebugOpt>
+      <tIfile></tIfile>
+      <tLdApp>0</tLdApp>
+    </DebugOpt>
+  </Target>
+</ProjectOpt>
+";
+
+    /// `.uvprojx` shape: `<Target>` sits under `<Targets>`, and the download
+    /// flag is in `<TargetOption><Utilities><Flash1>`.
+    const UVPROJX: &str = "\
+<Project>
+  <SchemaVersion>2.1</SchemaVersion>
+  <Targets>
+    <Target>
+      <TargetName>TX_SlotA</TargetName>
+      <TargetOption>
+        <Utilities>
+          <Flash1>
+            <UseTargetDll>1</UseTargetDll>
+            <UpdateFlashBeforeDebugging>1</UpdateFlashBeforeDebugging>
+          </Flash1>
+        </Utilities>
+      </TargetOption>
+    </Target>
+  </Targets>
+</Project>
+";
+
+    /// The two files disagree about where `<Target>` lives, which is what the
+    /// recursive search is for.
+    #[test]
+    fn patches_the_right_target_in_both_file_shapes() {
+        let (patched, orig) = patch_tag(UVOPTX, "TX_SlotA", "tLdApp", "0").unwrap();
+        assert_eq!(orig.as_deref(), Some("1"));
+        assert!(patched.contains("<tLdApp>0</tLdApp>"));
+
+        let (patched, orig) =
+            patch_tag(UVPROJX, "TX_SlotA", "UpdateFlashBeforeDebugging", "0").unwrap();
+        assert_eq!(orig.as_deref(), Some("1"));
+        assert!(patched.contains("<UpdateFlashBeforeDebugging>0</UpdateFlashBeforeDebugging>"));
+    }
+
+    /// Only the matching target's flag may change: the second target's `tLdApp`
+    /// is already 0, and the first one must not leak into it.
+    #[test]
+    fn the_other_target_is_left_alone() {
+        let (patched, _) = patch_tag(UVOPTX, "TX_SlotA", "tLdApp", "9").unwrap();
+        let tx_slot_b = patched.split("<TargetName>TX_SlotB</TargetName>").nth(1).unwrap();
+        assert!(tx_slot_b.contains("<tLdApp>0</tLdApp>"), "{tx_slot_b}");
+    }
+
+    /// The edit is a range replacement, so every byte outside the field is
+    /// untouched. Anything else would show up as a huge diff in the user's
+    /// project file.
+    #[test]
+    fn nothing_but_the_field_changes() {
+        let (patched, _) = patch_tag(UVPROJX, "TX_SlotA", "UpdateFlashBeforeDebugging", "0").unwrap();
+        assert_eq!(
+            patched,
+            UVPROJX.replace(
+                "<UpdateFlashBeforeDebugging>1</UpdateFlashBeforeDebugging>",
+                "<UpdateFlashBeforeDebugging>0</UpdateFlashBeforeDebugging>"
+            )
+        );
+    }
+
+    #[test]
+    fn restoring_puts_the_original_value_back() {
+        let (patched, orig) = patch_tag(UVOPTX, "TX_SlotA", "tLdApp", "0").unwrap();
+        let restored = restore_tag(&patched, "TX_SlotA", "tLdApp", orig.as_deref().unwrap()).unwrap();
+        assert_eq!(restored, UVOPTX);
+    }
+
+    /// A project without the flag is not an error: there is simply nothing to
+    /// restore, and the session runs with whatever the project already says.
+    #[test]
+    fn a_missing_tag_changes_nothing() {
+        let (patched, orig) = patch_tag(UVOPTX, "TX_SlotA", "UpdateFlashBeforeDebugging", "0").unwrap();
+        assert_eq!(patched, UVOPTX);
+        assert_eq!(orig, None);
+    }
+
+    #[test]
+    fn an_unknown_target_is_an_error() {
+        assert!(patch_tag(UVOPTX, "NoSuchTarget", "tLdApp", "0").is_err());
+    }
+
+    fn args_run_to(sym: &str) -> DebugArgs {
+        DebugArgs {
+            read: None,
+            dump: None,
+            regs: false,
+            break_: None,
+            run_to: Some(sym.to_string()),
+            step: None,
+            pstep: None,
+            ini: None,
+            timeout: 60,
+            no_reset: false,
+            no_download: false,
+        }
+    }
+
+    /// `G start,stop` is the form that actually stops on a real target. The
+    /// obvious BS/G/BC encoding left the program running for the whole
+    /// timeout: `G` with no stop address never honoured the listed breakpoint
+    /// (measured on STM32H750 + ST-Link; `G ,main` stopped instantly).
+    #[test]
+    fn run_to_uses_the_temporary_breakpoint_form() {
+        let ini = build_ini(&args_run_to("main"), Path::new("dump.txt"));
+        assert!(ini.contains("G ,main"), "{ini}");
+        assert!(!ini.contains("BS main"), "{ini}");
+    }
+
+    /// RESET is skipped on request, but must be the first command otherwise.
+    #[test]
+    fn reset_can_be_skipped() {
+        let mut a = args_run_to("main");
+        assert!(build_ini(&a, Path::new("d.txt")).starts_with("RESET\n"));
+
+        a.no_reset = true;
+        assert!(!build_ini(&a, Path::new("d.txt")).contains("RESET"));
     }
 }

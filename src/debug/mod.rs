@@ -31,6 +31,7 @@ pub fn handle(
             ini,
             timeout,
             no_reset,
+            no_download,
         } => {
             let proj = PathBuf::from(&path);
             let target_name = match target {
@@ -43,6 +44,10 @@ pub fn handle(
                         .context("no target found in project")?
                 }
             };
+            // Same pre-flight as `keil flash`: a project pointed at a probe that
+            // is not attached fails inside UV4 with an error naming neither side.
+            crate::keil::probe::warn_if_probe_mismatch(&proj, &target_name);
+
             let args = keil_debug::DebugArgs {
                 read: read.clone(),
                 dump: dump.clone(),
@@ -54,10 +59,19 @@ pub fn handle(
                 ini: ini.as_ref().map(PathBuf::from),
                 timeout: *timeout,
                 no_reset: *no_reset,
+                no_download: *no_download,
             };
             let res = keil_debug::run(&proj, &target_name, &args, cfg)?;
             let pairs = vec![
                 ("Target".into(), target_name.clone()),
+                (
+                    "Download".into(),
+                    if *no_download {
+                        "skipped (--no-download)".into()
+                    } else {
+                        "as configured in the project".into()
+                    },
+                ),
                 ("Exit Code".into(), res.exit_code.to_string()),
                 (
                     "Timed Out".into(),
@@ -78,6 +92,29 @@ pub fn handle(
                 }
             }
             if res.timed_out || res.exit_code != 0 {
+                // "Timed out" on its own reads like a tool problem. When the
+                // session was waiting for a symbol, say so: the usual cause is
+                // that the target never runs that code at all (a bootloader
+                // that rejects the image, a breakpoint on the wrong core).
+                let waited_for = run_to.clone().or_else(|| break_.clone());
+                if res.timed_out {
+                    if let Some(sym) = waited_for {
+                        sections.push(OutputValue::Message(format!(
+                            "note: the target never reached '{sym}' within {}s. \
+                             If the board is sitting in a bootloader, that code was \
+                             never executed - check that the image the bootloader \
+                             starts is actually the one this project built.",
+                            timeout
+                        )));
+                    }
+                }
+                // "Target DLL has been cancelled" names neither the probe the
+                // project wants nor the fact that none is attached at all.
+                if let Some(hint) =
+                    crate::keil::probe::missing_probe_hint(&proj, &target_name)
+                {
+                    sections.push(OutputValue::Message(hint));
+                }
                 if let Some(tail) = keil_debug::log_tail(&res.uv4_log) {
                     sections.push(OutputValue::Message(tail));
                 }

@@ -99,8 +99,37 @@ pub fn write_map_fixture(name: &str) -> PathBuf {
     )
 }
 
-/// Write a two-project workspace and return the `.uvmpw` path.
+/// Write a map that carries a symbol table, for `keil map --lookup`.
 ///
+/// Rows are copied from a real armlink map so the shapes that are easy to get
+/// wrong stay covered: a `Thumb Code` function whose value has bit 0 set, a
+/// `Section` marker sitting at the same address as that function, a name with a
+/// space in it, and a linker-generated object with a space and no parentheses.
+pub fn write_symbol_map_fixture(name: &str) -> PathBuf {
+    write_scratch(
+        name,
+        "\
+  Image Entry point : 0x90001000
+
+    Local Symbols
+
+    Symbol Name                              Value     Ov Type        Size  Object(Section)
+
+    etharp_raw                               0x90035399   Thumb Code   360  etharp.o(.text.etharp_raw)
+    [Anonymous Symbol]                       0x90035398   Section        0  etharp.o(.text.etharp_raw)
+
+==============================================================================
+
+    Global Symbols
+
+    Symbol Name                              Value     Ov Type        Size  Object(Section)
+
+    Image$$ER_SYS_INIT$$Base                 0x90092948   Number         0  anon$$obj.o ABSOLUTE
+",
+    )
+}
+
+/// Write a two-project workspace and return the `.uvmpw` path.///
 /// The sub-projects have different target names and different defines, so a
 /// test can tell which one `-p <project>` actually selected.
 pub fn write_workspace(name: &str) -> PathBuf {

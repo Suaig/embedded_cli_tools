@@ -43,8 +43,22 @@ fn build_config(
     SerialConfig::new(baud, to_data_bits(data_bits), to_parity(parity), to_stop_bits(stop_bits))
 }
 
-pub fn handle(serial: &super::SerialCommands, format: OutputFormat) -> anyhow::Result<()> {
-    match serial {
+/// Text form of a `poke` reply.
+///
+/// An empty reply is a normal outcome (the device did not answer within
+/// `--wait`), so it is named rather than rendered as nothing.
+fn render_reply(reply: &[u8], hex: bool) -> String {
+    if reply.is_empty() {
+        return "(no reply)".to_string();
+    }
+    if hex {
+        protocol::encode_hex(reply)
+    } else {
+        String::from_utf8_lossy(reply).into_owned()
+    }
+}
+
+pub fn handle(serial: &super::SerialCommands, format: OutputFormat) -> anyhow::Result<()> {    match serial {
         super::SerialCommands::Scan => {
             let ports = port::scan()?;
             let headers = vec![
@@ -119,9 +133,12 @@ fn handle_daemon(daemon: &super::DaemonCommands, format: OutputFormat) -> anyhow
             data_bits,
             parity,
             stop_bits,
+            ttl,
+            idle_timeout,
         } => {
             let config = build_config(*baud, data_bits, parity, stop_bits);
-            let daemon_id = daemon::start(port, *baud, id.as_deref(), &config)?;
+            let daemon_id =
+                daemon::start(port, *baud, id.as_deref(), &config, *ttl, *idle_timeout)?;
             output::display(&OutputValue::Message(daemon_id), format);
         }
         super::DaemonCommands::List => {
@@ -135,6 +152,7 @@ fn handle_daemon(daemon: &super::DaemonCommands, format: OutputFormat) -> anyhow
                     "Baud".into(),
                     "PID".into(),
                     "Status".into(),
+                    "Limits".into(),
                     "Started".into(),
                 ];
                 let rows: Vec<Vec<String>> = daemons
@@ -146,6 +164,7 @@ fn handle_daemon(daemon: &super::DaemonCommands, format: OutputFormat) -> anyhow
                             d.baud_rate.to_string(),
                             d.pid.to_string(),
                             d.status.clone(),
+                            d.limits_display(),
                             d.started_at.clone(),
                         ]
                     })
@@ -161,6 +180,33 @@ fn handle_daemon(daemon: &super::DaemonCommands, format: OutputFormat) -> anyhow
             };
             daemon::send(id, &bytes)?;
             output::display(&OutputValue::Message("ok".into()), format);
+        }
+        super::DaemonCommands::Poke {
+            id,
+            data,
+            wait,
+            repeat,
+            interval,
+            hex,
+        } => {
+            let bytes = protocol::decode_hex(data)?;
+            let repeats = (*repeat).max(1);
+            let mut replies: Vec<String> = Vec::new();
+
+            for i in 0..repeats {
+                if i > 0 && *interval > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(*interval));
+                }
+                let reply = daemon::poke(id, &bytes, *wait)?;
+                replies.push(render_reply(&reply, *hex));
+            }
+
+            // One cycle reads like `read`; several need to stay distinguishable.
+            if replies.len() == 1 {
+                output::display(&OutputValue::Message(replies.remove(0)), format);
+            } else {
+                output::display(&OutputValue::List(replies), format);
+            }
         }
         super::DaemonCommands::Read {
             id,

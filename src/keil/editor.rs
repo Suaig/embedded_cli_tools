@@ -712,11 +712,189 @@ pub fn file_add(
         );
     }
 
-    save_xml(&root, path)?;
+    // Keep the file's formatting when its shape is the one Keil writes; fall
+    // back to the xmltree round-trip when it is not.
+    if !insert_file_text(path, group, file_name, &file_type.to_string(), filepath)? {
+        save_xml(&root, path)?;
+    }
     Ok(())
 }
 
+/// Splice a `<File>` element into the project text without re-serialising it.
+///
+/// `save_xml` runs the whole document through xmltree, which reorders
+/// attributes, drops `xsi:` prefixes and deletes blank lines — so adding one
+/// entry produces a `git diff` over thousands of lines. Keil itself writes
+/// consistently indented files, so the new element can be spliced into the text
+/// with every other byte untouched.
+///
+/// Returns `Ok(false)` when the document is not shaped the way this expects
+/// (`<Files></Files>` on one line, attributes on `<Group>`, odd nesting). The
+/// caller then falls back to `save_xml`: a reformatted file is bad, a corrupt
+/// one is worse.
+fn insert_file_text(
+    path: &Path,
+    group: &str,
+    file_name: &str,
+    file_type: &str,
+    filepath: &str,
+) -> anyhow::Result<bool> {
+    let text = std::fs::read_to_string(path)?;
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let trailing_newline = text.ends_with('\n');
+    let lines: Vec<&str> = text.lines().collect();
+
+    // Locate the <Group> block whose <GroupName> is the target group. Groups do
+    // not nest in a .uvprojx, but keep a depth counter anyway so a `<Group>`
+    // inside some future element cannot be mistaken for the real one.
+    let mut depth: usize = 0;
+    let mut block_start: Option<usize> = None;
+    let mut block_is_ours = false;
+    let mut block: Option<(usize, usize)> = None;
+
+    for (i, line) in lines.iter().enumerate() {
+        let t = line.trim();
+        if t.starts_with("<Group>") {
+            depth += 1;
+            if depth == 1 {
+                block_start = Some(i);
+                block_is_ours = false;
+            }
+        } else if t.starts_with("</Group>") && depth > 0 {
+            if depth == 1 {
+                if block_is_ours {
+                    if let Some(start) = block_start {
+                        block = Some((start, i));
+                    }
+                    break;
+                }
+                block_start = None;
+            }
+            depth -= 1;
+        } else if t.starts_with("<GroupName>") && depth == 1 {
+            // <GroupName>NAME</GroupName>
+            let name = t
+                .trim_start_matches("<GroupName>")
+                .split("</GroupName>")
+                .next()
+                .unwrap_or("")
+                .trim();
+            if name == group {
+                block_is_ours = true;
+            }
+        }
+    }
+
+    let Some((start, end)) = block else {
+        return Ok(false);
+    };
+
+    let has_files_tag = lines[start..=end].iter().any(|l| l.contains("<Files"));
+
+    // An existing <Files> element must be the plain multi-line form; anything
+    // else (attributes, or `<Files></Files>` on one line) is not worth guessing
+    // at.
+    let files_open = lines[start..=end]
+        .iter()
+        .position(|l| l.trim() == "<Files>")
+        .map(|p| p + start);
+    let files_close = lines[start..=end]
+        .iter()
+        .position(|l| l.trim() == "</Files>")
+        .map(|p| p + start);
+
+    if has_files_tag && (files_open.is_none() || files_close.is_none()) {
+        return Ok(false);
+    }
+
+    let indent_of = |idx: usize| -> String {
+        let l = lines[idx];
+        l[..l.len() - l.trim_start().len()].to_string()
+    };
+
+    let (insert_at, file_indent) = match (files_open, files_close) {
+        // Normal: append inside the existing <Files> block.
+        (Some(open), Some(close)) => {
+            let child = lines[open + 1..close]
+                .iter()
+                .find(|l| l.trim_start().starts_with("<File>"))
+                .map(|l| l[..l.len() - l.trim_start().len()].to_string())
+                .unwrap_or_else(|| format!("{}  ", indent_of(open)));
+            (close, child)
+        }
+        // The group has no <Files> element yet: create one, with the new file.
+        _ => {
+            let files_indent = format!("{}  ", indent_of(start));
+            let file_indent = format!("{files_indent}  ");
+            let block = format!(
+                "{files_indent}<Files>{newline}\
+                 {file_indent}<File>{newline}\
+                 {file_indent}  <FileName>{}</FileName>{newline}\
+                 {file_indent}  <FileType>{file_type}</FileType>{newline}\
+                 {file_indent}  <FilePath>{}</FilePath>{newline}\
+                 {file_indent}</File>{newline}\
+                 {files_indent}</Files>{newline}",
+                xml_escape(file_name),
+                xml_escape(filepath),
+            );
+            return write_with_splice(path, &lines, end, newline, &block, trailing_newline);
+        }
+    };
+
+    let child_indent = format!("{file_indent}  ");
+    let block = format!(
+        "{file_indent}<File>{newline}\
+         {child_indent}<FileName>{}</FileName>{newline}\
+         {child_indent}<FileType>{file_type}</FileType>{newline}\
+         {child_indent}<FilePath>{}</FilePath>{newline}\
+         {file_indent}</File>{newline}",
+        xml_escape(file_name),
+        xml_escape(filepath),
+    );
+
+    write_with_splice(path, &lines, insert_at, newline, &block, trailing_newline)
+}
+
+/// Rebuild the document with `block` inserted before line `at`, and write it.
+fn write_with_splice(
+    path: &Path,
+    lines: &[&str],
+    at: usize,
+    newline: &str,
+    block: &str,
+    trailing_newline: bool,
+) -> anyhow::Result<bool> {
+    let mut out = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        if i == at {
+            out.push_str(block);
+        }
+        out.push_str(line);
+        out.push_str(newline);
+    }
+    if !trailing_newline {
+        out.truncate(out.trim_end_matches(newline).len());
+    }
+    std::fs::write(path, out)?;
+    Ok(true)
+}
+
+/// Escape the characters that would end a text node early.
+fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 pub fn file_remove(
+
     path: &Path,
     target: &str,
     group: &str,

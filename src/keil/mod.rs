@@ -3,6 +3,7 @@ pub mod editor;
 pub mod builder;
 pub mod map;
 pub mod locate;
+pub mod probe;
 
 pub use parser::{
     load_project, load_workspace,
@@ -403,6 +404,7 @@ fn cmd_build(
     target: &Option<String>,
     project: &Option<String>,
     command: builder::BuildCommand,
+    opts: builder::BuildOptions,
     cfg: &crate::config::EmbConfig,
     format: OutputFormat,
 ) -> anyhow::Result<()> {
@@ -413,12 +415,22 @@ fn cmd_build(
 
     // Reject an unknown target here rather than handing it to UV4, which
     // reports it as a silent "Success: no" with no diagnostics.
-    if let Some(name) = target {
+    //
+    // Flash also needs the target name so the probe check can pick the right
+    // `<Target>` block out of the .uvoptx.
+    let is_flash = matches!(command, builder::BuildCommand::Flash);
+    if target.is_some() || is_flash {
         let proj = load_project(&project_path)?;
-        resolve_target(&proj, &Some(name.clone()))?;
+        let resolved = resolve_target(&proj, target)?;
+        if is_flash {
+            // Best-effort and warning-only: a project pointed at a probe that
+            // is not attached fails inside UV4 with an error naming neither
+            // the probe it wanted nor the one that is there.
+            probe::warn_if_probe_mismatch(&project_path, &resolved.name);
+        }
     }
 
-    let result = builder::build(&project_path, target, command, uv4_path)?;
+    let result = builder::build(&project_path, target, command, uv4_path, &opts)?;
 
     let mut pairs = vec![
         ("Success".into(), if result.success { "yes" } else { "no" }.into()),
@@ -600,21 +612,28 @@ pub fn handle(_cli: &Cli, keil: &super::KeilCommands, cfg: &crate::config::EmbCo
             output::display(&OutputValue::Message("ok".into()), format);
             Ok(())
         }
-        super::KeilCommands::Build { path, target, project } => {
-            cmd_build(path, target, project, builder::BuildCommand::Build, cfg, format)
+        super::KeilCommands::Build { path, target, project, build } => {
+            cmd_build(path, target, project, builder::BuildCommand::Build, build.options(), cfg, format)
         }
-        super::KeilCommands::Rebuild { path, target, project } => {
-            cmd_build(path, target, project, builder::BuildCommand::Rebuild, cfg, format)
+        super::KeilCommands::Rebuild { path, target, project, build } => {
+            cmd_build(path, target, project, builder::BuildCommand::Rebuild, build.options(), cfg, format)
         }
-        super::KeilCommands::Clean { path, target, project } => {
-            cmd_build(path, target, project, builder::BuildCommand::Clean, cfg, format)
+        super::KeilCommands::Clean { path, target, project, timeout } => {
+            let opts = builder::BuildOptions { timeout_secs: *timeout, stream: false };
+            cmd_build(path, target, project, builder::BuildCommand::Clean, opts, cfg, format)
         }
-        super::KeilCommands::Flash { path, target, project } => {
-            cmd_build(path, target, project, builder::BuildCommand::Flash, cfg, format)
+        super::KeilCommands::Flash { path, target, project, build } => {
+            cmd_build(path, target, project, builder::BuildCommand::Flash, build.options(), cfg, format)
         }
-        super::KeilCommands::Map { path } => {
-            let info = map::parse_map(&PathBuf::from(path))?;
-            cmd_map(&info, format);
+        super::KeilCommands::Map { path, lookup } => {
+            match lookup {
+                Some(addrs) => {
+                    let text = std::fs::read_to_string(path)
+                        .with_context(|| format!("read map file: {path}"))?;
+                    cmd_map_lookup(&text, addrs, format)?;
+                }
+                None => cmd_map(&map::parse_map(&PathBuf::from(path))?, format),
+            }
             Ok(())
         }
         super::KeilCommands::Locate { path, target, element, project } => {
@@ -686,6 +705,55 @@ fn cmd_map(info: &map::MapInfo, format: OutputFormat) {
         ]),
         format,
     );
+}
+
+/// `keil map --lookup`: translate code addresses into symbols.
+///
+/// This is the first thing to reach for after a HardFault — the fault handler
+/// gives a PC and an LR, and the map is the only place that says what they are.
+fn cmd_map_lookup(text: &str, addresses: &str, format: OutputFormat) -> anyhow::Result<()> {
+    let symbols = map::parse_map_symbols(text);
+    if symbols.is_empty() {
+        anyhow::bail!(
+            "no symbol table in this map - armlink only writes one when the \
+             linker's symbol listing is enabled"
+        );
+    }
+
+    let headers: Vec<String> = vec![
+        "Address".into(),
+        "Symbol".into(),
+        "Offset".into(),
+        "Type".into(),
+        "Object(Section)".into(),
+    ];
+    let mut rows: Vec<Vec<String>> = Vec::new();
+
+    for raw in addresses.split(',') {
+        let raw = raw.trim();
+        let addr = map::parse_hex(raw)
+            .ok_or_else(|| anyhow::anyhow!("not a hex address: '{raw}'"))?;
+
+        rows.push(match map::lookup_symbol(&symbols, addr) {
+            Some(hit) => vec![
+                format!("0x{addr:08X}"),
+                hit.symbol.name.clone(),
+                format!("+0x{:X}", hit.offset),
+                hit.symbol.kind.clone(),
+                hit.symbol.object.clone(),
+            ],
+            None => vec![
+                format!("0x{addr:08X}"),
+                "(below every symbol)".into(),
+                "-".into(),
+                "-".into(),
+                "-".into(),
+            ],
+        });
+    }
+
+    output::display(&OutputValue::Table { headers, rows }, format);
+    Ok(())
 }
 
 /// Turn a finished UV4 run into a command outcome.

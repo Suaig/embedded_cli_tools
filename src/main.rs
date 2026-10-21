@@ -44,6 +44,14 @@ struct Cli {
     #[arg(long, hide = true)]
     stop_bits: Option<String>,
 
+    /// Internal: hard lifetime cap for daemon mode (hidden)
+    #[arg(long, hide = true)]
+    ttl: Option<u64>,
+
+    /// Internal: idle timeout for daemon mode (hidden)
+    #[arg(long, hide = true)]
+    idle_timeout: Option<u64>,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -336,6 +344,8 @@ enum KeilCommands {
         /// Project name in workspace (for .uvmpw files)
         #[arg(short, long)]
         project: Option<String>,
+        #[command(flatten)]
+        build: BuildArgs,
     },
     /// Rebuild the project
     Rebuild {
@@ -347,6 +357,8 @@ enum KeilCommands {
         /// Project name in workspace (for .uvmpw files)
         #[arg(short, long)]
         project: Option<String>,
+        #[command(flatten)]
+        build: BuildArgs,
     },
     /// Clean build artifacts
     Clean {
@@ -358,6 +370,9 @@ enum KeilCommands {
         /// Project name in workspace (for .uvmpw files)
         #[arg(short, long)]
         project: Option<String>,
+        /// Wall-clock cap in seconds; 0 = no cap
+        #[arg(long, default_value_t = 0)]
+        timeout: u64,
     },
     /// Flash firmware to target
     Flash {
@@ -369,11 +384,16 @@ enum KeilCommands {
         /// Project name in workspace (for .uvmpw files)
         #[arg(short, long)]
         project: Option<String>,
+        #[command(flatten)]
+        build: BuildArgs,
     },
     /// Analyze a Keil armlink .map file (totals + execution regions)
     Map {
         /// Path to Keil .map file
         path: String,
+        /// Translate code addresses to symbols (comma-separated hex, e.g. 0x90034FCE)
+        #[arg(long, value_name = "ADDR")]
+        lookup: Option<String>,
     },
     /// Locate an XML element (line + raw snippet) for AI-assisted editing
     Locate {
@@ -388,6 +408,33 @@ enum KeilCommands {
         #[arg(short, long)]
         project: Option<String>,
     },
+}
+
+/// Supervision flags shared by the commands that run a UV4 build.
+///
+/// Defaults are deliberately quiet: no wall-clock cap, no log echo. A real
+/// rebuild of a large project can take many minutes and produce tens of
+/// kilobytes of log, and neither belongs in the output of a build that passes.
+/// What does run by default is the watchdog inside `builder`: UV4 spending
+/// zero CPU for 30 s means it is blocked on a dialog, not busy.
+#[derive(clap::Args)]
+struct BuildArgs {
+    /// Wall-clock cap in seconds; 0 = no cap (a stuck build is caught by the
+    /// zero-CPU watchdog instead)
+    #[arg(long, default_value_t = 0)]
+    timeout: u64,
+    /// Echo UV4's build log to stderr as it grows
+    #[arg(long)]
+    stream: bool,
+}
+
+impl BuildArgs {
+    fn options(&self) -> crate::keil::builder::BuildOptions {
+        crate::keil::builder::BuildOptions {
+            timeout_secs: self.timeout,
+            stream: self.stream,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -519,6 +566,12 @@ enum DaemonCommands {
         /// Stop bits
         #[arg(short = 's', long, default_value = "1")]
         stop_bits: SerialStopBits,
+        /// Exit after this many seconds, whatever happens
+        #[arg(long, value_name = "SECS")]
+        ttl: Option<u64>,
+        /// Exit after this many seconds without a send/read/poke from another emb command
+        #[arg(long, value_name = "SECS")]
+        idle_timeout: Option<u64>,
     },
     /// List running daemons
     List,
@@ -529,6 +582,28 @@ enum DaemonCommands {
         /// Data to send
         data: String,
         /// Interpret data as hex string
+        #[arg(long)]
+        hex: bool,
+    },
+    /// Send bytes and read the reply in one call
+    ///
+    /// Unlike `send` followed by `read`, the wait between the write and the read
+    /// is part of this command, which is what byte-level handshakes need.
+    Poke {
+        /// Daemon instance ID
+        id: String,
+        /// Bytes to send, as a hex string (e.g. 7f or 7f0001)
+        data: String,
+        /// Milliseconds to wait for the reply before reading
+        #[arg(long, default_value_t = 50)]
+        wait: u64,
+        /// Repeat the write/wait/read cycle this many times
+        #[arg(long, default_value_t = 1)]
+        repeat: u32,
+        /// Milliseconds between repeats
+        #[arg(long, default_value_t = 0)]
+        interval: u64,
+        /// Display the reply as hex instead of text
         #[arg(long)]
         hex: bool,
     },
@@ -697,6 +772,10 @@ enum DebugCommands {
         /// Skip the initial RESET
         #[arg(long = "no-reset")]
         no_reset: bool,
+        /// Do not download to the target: read from the firmware already running
+        /// (clears the project's download flags for this session, then restores them)
+        #[arg(long = "no-download")]
+        no_download: bool,
     },
 }
 
@@ -754,7 +833,14 @@ fn main() -> anyhow::Result<()> {
         let stop_bits = serial::port::stop_bits_from_value(sb)
             .expect("internal --stop-bits must be 1 or 2");
         let config = serial::port::SerialConfig::new(baud_rate, data_bits, parity, stop_bits);
-        return serial::daemon::serve(daemon_id, port_name, baud_rate, &config);
+        return serial::daemon::serve(
+            daemon_id,
+            port_name,
+            baud_rate,
+            &config,
+            cli.ttl,
+            cli.idle_timeout,
+        );
     }
 
     if cli.ai && cli.json {

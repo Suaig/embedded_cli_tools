@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use serde::Serialize;
@@ -27,6 +28,35 @@ impl BuildCommand {
         }
     }
 
+}
+
+/// How long UV4 may consume no CPU at all before it is called stuck.
+///
+/// `-j0` hides the window but does not stop μVision from raising a modal
+/// dialog, and a dialog blocks the process at zero CPU. That is exactly the
+/// state that reads like "a big build, be patient" for minutes on end — the
+/// build that motivated this sat frozen for over two minutes with a 0-byte log.
+/// A build that is actually working always burns CPU, so this cannot fire on a
+/// slow-but-healthy one. A licence checkout wait looks the same from outside;
+/// it is just as hopeless to wait on from a non-interactive caller.
+const STALL_LIMIT_SECS: u64 = 30;
+
+/// How often the child and its log are looked at.
+const POLL_INTERVAL_MS: u64 = 100;
+
+/// Supervision options for a build, as opposed to the build's content.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BuildOptions {
+    /// Wall-clock cap in seconds. 0 means no cap: a legitimate full rebuild of
+    /// a large project can run for many minutes, and killing it would be worse
+    /// than waiting. The stall detector is the guard that actually matters.
+    pub timeout_secs: u64,
+    /// Echo the build log to stderr as it grows.
+    ///
+    /// Opt-in: a real rebuild produces tens of kilobytes of log, which is more
+    /// noise than an agent wants on a build that passes. Turn it on when a
+    /// build is slow or stuck and you need to see where it got to.
+    pub stream: bool,
 }
 
 /// Parsed program size from the build log.
@@ -330,11 +360,13 @@ fn parse_program_size(s: &str) -> Option<ProgramSize> {
 /// `path` is the .uvprojx project file path.
 /// `target` optionally selects the build target.
 /// `command` selects build / rebuild / clean / flash.
+/// `opts` governs supervision (timeout cap, log streaming), not the build.
 pub fn build(
     path: &Path,
     target: &Option<String>,
     command: BuildCommand,
     uv4_path: Option<PathBuf>,
+    opts: &BuildOptions,
 ) -> anyhow::Result<BuildResult> {
     let uv4 = match uv4_path {
         Some(p) => prefer_com(&p).context("failed to locate UV4.exe")?,
@@ -347,14 +379,14 @@ pub fn build(
 
     // Clean does not produce a meaningful log; run and check exit code only.
     if matches!(command, BuildCommand::Clean) {
-        return run_clean(&uv4, path, target);
+        return run_clean(&uv4, path, target, opts);
     }
 
     // Create a temp file for the build log.
     let temp_dir = std::env::temp_dir();
     let log_file = temp_dir.join(format!("emb_build_{}.log", uuid::Uuid::new_v4().simple()));
 
-    let result = run_uv4(&uv4, path, target, command, &log_file);
+    let run = run_uv4(&uv4, path, target, command, &log_file, opts);
 
     // Read the log regardless of exit status.
     let log_content = std::fs::read_to_string(&log_file).unwrap_or_default();
@@ -362,7 +394,18 @@ pub fn build(
     // Clean up temp log file (best-effort).
     let _ = std::fs::remove_file(&log_file);
 
-    let exit_code = result?;
+    // A timed-out or stuck UV4 never reports anything itself; whatever it
+    // managed to write is the only clue about where it stopped.
+    let exit_code = match run {
+        Ok(code) => code,
+        Err(err) => {
+            let tail = tail_lines(&log_content, 15);
+            if tail.is_empty() {
+                return Err(err);
+            }
+            anyhow::bail!("{err}\n--- build log, last 15 lines ---\n{tail}")
+        }
+    };
 
     let (errors, warnings, build_time, program_size, output_file) =
         parse_build_log(&log_content);
@@ -386,6 +429,7 @@ fn run_uv4(
     target: &Option<String>,
     command: BuildCommand,
     log_file: &Path,
+    opts: &BuildOptions,
 ) -> anyhow::Result<u32> {
     let mut cmd = Command::new(uv4);
 
@@ -408,9 +452,16 @@ fn run_uv4(
     // Log output
     cmd.arg("-o").arg(log_file);
 
-    let status = cmd
-        .status()
+    // Nothing may read our stdin: if UV4 ever does decide to show a dialog, it
+    // must not be handed whatever the caller attached to the terminal.
+    cmd.stdin(Stdio::null());
+
+    let mut child = cmd
+        .spawn()
         .with_context(|| format!("failed to execute UV4 at {}", uv4.display()))?;
+
+    let mut poller = LogPoller::new(log_file, opts.stream);
+    let status = supervise(&mut child, Some(&mut poller), opts)?;
 
     // UV4 exit code semantics: 0=success, 1=warnings, 2+=errors, 20=special errors
     Ok(status.code().unwrap_or(1) as u32)
@@ -420,6 +471,7 @@ fn run_clean(
     uv4: &Path,
     project: &Path,
     target: &Option<String>,
+    opts: &BuildOptions,
 ) -> anyhow::Result<BuildResult> {
     let mut cmd = Command::new(uv4);
     cmd.arg("-j0");
@@ -432,8 +484,12 @@ fn run_clean(
         cmd.arg("-t").arg(t);
     }
 
-    let status = cmd.status()
+    cmd.stdin(Stdio::null());
+
+    let mut child = cmd
+        .spawn()
         .with_context(|| format!("failed to execute UV4 at {}", uv4.display()))?;
+    let status = supervise(&mut child, None, opts)?;
 
     let code = status.code().unwrap_or(1) as u32;
     let success = code == 0;
@@ -447,6 +503,164 @@ fn run_clean(
         output_file: String::new(),
         log: String::new(),
     })
+}
+
+/// Wait for a running UV4, optionally echoing its log, and give up when it
+/// stops making progress.
+///
+/// Wall-clock alone cannot tell "a slow build" from "a dialog nobody will
+/// answer", and the caller is usually not a human who can look at the window.
+/// CPU time separates them: a blocked process consumes none.
+fn supervise(
+    child: &mut Child,
+    mut log: Option<&mut LogPoller>,
+    opts: &BuildOptions,
+) -> anyhow::Result<ExitStatus> {
+    let started = Instant::now();
+    let mut last_cpu: Option<u64> = None;
+    let mut last_progress = Instant::now();
+
+    loop {
+        if let Some(status) = child.try_wait()? {
+            if let Some(poller) = log.as_deref_mut() {
+                poller.drain();
+            }
+            return Ok(status);
+        }
+
+        if let Some(poller) = log.as_deref_mut() {
+            poller.drain();
+        }
+
+        if opts.timeout_secs > 0 && started.elapsed().as_secs() >= opts.timeout_secs {
+            kill(child);
+            anyhow::bail!(
+                "UV4 was still running after {}s and was terminated (--timeout)",
+                opts.timeout_secs
+            );
+        }
+
+        if let Some(cpu) = process_cpu_time(child.id()) {
+            if last_cpu != Some(cpu) {
+                last_cpu = Some(cpu);
+                last_progress = Instant::now();
+            } else if last_progress.elapsed().as_secs() >= STALL_LIMIT_SECS {
+                kill(child);
+                anyhow::bail!(
+                    "UV4 consumed no CPU for {STALL_LIMIT_SECS}s and was terminated - it is \
+                     blocked, most likely on a modal dialog (-j0 hides the window, not the \
+                     dialog) or on a licence checkout"
+                );
+            }
+        }
+
+        std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
+    }
+}
+
+fn kill(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// CPU time consumed by a process so far, in 100 ns units.
+///
+/// `None` means "cannot tell", and the caller then relies on the wall-clock cap
+/// alone rather than guessing.
+#[cfg(target_os = "windows")]
+fn process_cpu_time(pid: u32) -> Option<u64> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+
+        let mut creation = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let mut exit = creation;
+        let mut kernel = creation;
+        let mut user = creation;
+        let ok = GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user);
+        CloseHandle(handle);
+
+        if ok == 0 {
+            return None;
+        }
+        Some(filetime_ticks(kernel) + filetime_ticks(user))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn filetime_ticks(t: windows_sys::Win32::Foundation::FILETIME) -> u64 {
+    ((t.dwHighDateTime as u64) << 32) | t.dwLowDateTime as u64
+}
+
+#[cfg(not(target_os = "windows"))]
+fn process_cpu_time(_pid: u32) -> Option<u64> {
+    None
+}
+
+/// Echoes whatever the build log has grown by since the last poll.
+///
+/// Keil has no way to stream a build to stdout — the only output is the `-o`
+/// log file — but it *writes* that file as it goes (measured on a real
+/// rebuild: 4 bytes at start, 46 KB by the end, growing continuously).
+/// Following it is therefore enough, and needs nothing from Keil.
+struct LogPoller {
+    path: PathBuf,
+    offset: u64,
+    enabled: bool,
+}
+
+impl LogPoller {
+    fn new(path: &Path, enabled: bool) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            offset: 0,
+            enabled,
+        }
+    }
+
+    /// Forward every complete line written since the last call.
+    ///
+    /// Only whole lines are consumed: the bytes after the last newline are
+    /// still being written and would otherwise be cut in half.
+    fn drain(&mut self) {
+        if !self.enabled {
+            return;
+        }
+        let Ok(data) = std::fs::read(&self.path) else {
+            return;
+        };
+        if data.len() as u64 <= self.offset {
+            return;
+        }
+
+        let fresh = &data[self.offset as usize..];
+        let Some(last_newline) = fresh.iter().rposition(|b| *b == b'\n') else {
+            return;
+        };
+        let ready = &fresh[..=last_newline];
+        self.offset += ready.len() as u64;
+
+        // Progress belongs on stderr: stdout carries the command's result, and
+        // mixing the two would break `--json` and every pipe that reads it.
+        eprint!("{}", String::from_utf8_lossy(ready));
+    }
+}
+
+/// The last `n` lines of a log, for error messages.
+fn tail_lines(text: &str, n: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    lines[start..].join("\n")
 }
 
 #[cfg(test)]

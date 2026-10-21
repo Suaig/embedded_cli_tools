@@ -19,8 +19,10 @@ emb debug keil 走 `UV4 -d + .ini 脚本`：每次调用生成一段 `.ini`（`R
 
 ## 副作用（每次调用）
 
-- **会下载 flash + halt CPU**：工程 `UpdateFlashBeforeDebugging=1` 时，每次 debug 都重新烧录。耗时（下载+验证）。
-- **改 .uvoptx**：emb 临时改 `<tIfile>` 挂载 .ini，**跑完自动还原**。Keil 自身会改 .uvoptx 别的字段（探针探测 / 断点地址 / 窗口配置），属正常、无害。
+- **会下载 flash + halt CPU**：工程 `UpdateFlashBeforeDebugging=1` 时，每次 debug 都重新烧录。耗时（下载+验证）。只想连上读寄存器、不想冲掉正在跑的固件时加 **`--no-download`**（实测 5 s vs 31 s，UV4 日志里没有 `Erase Done. Programming Done.`）。
+- **改 .uvoptx / .uvprojx（都会还原）**：emb 临时改 `.uvoptx` 的 `<tIfile>` 挂载 .ini；`--no-download` 时再改一处——`.uvprojx` 的 `<UpdateFlashBeforeDebugging>`（Utilities 页「Update target before Debugging」，注意它在 **.uvprojx 不在 .uvoptx**）。跑完自动还原；实测 `.uvprojx` 逐字节回到原样。Keil 自身会改 .uvoptx 别的字段（探针探测 / 断点地址 / 窗口配置，例如 `<aLwin>`），属正常、无害。
+- ⚠️ **`--no-download` 特意不动 `.uvoptx` 的 `<tLdApp>`**（Debug 页「Load Application at Startup」）。实测它**不影响**下载（`tLdApp=0` 时照样擦除+编程），但关掉它**会丢符号表**——`BS main` 直接报 `*** error 34: undefined identifier`，`--break`/`--run-to` 全废。真正管下载的是 `.uvprojx` 那一个。
+- **没有探针时 UV4 只给一句 `Target DLL has been cancelled`**。emb 会在失败后补一行说明工程配的是哪种探针、以及本机一个都没检测到；`flash` 则在调用前就做同样的比对并警告。
 
 ## 读寄存器 / 内存
 
@@ -36,15 +38,17 @@ RESET 后读的是复位状态（外设多未初始化，读到的多是 0）。
 ## 断点 / 运行 / 单步（脚本化）
 
 ```
-emb debug keil <proj> -t <T> --break main                 # 设断点
-emb debug keil <proj> -t <T> --run-to main                # 跑到 main（临时断点+G+清除）
+emb debug keil <proj> -t <T> --break main                 # 设断点（不运行）
+emb debug keil <proj> -t <T> --run-to main                # 跑到 main 再继续执行后面的读/转储
 emb debug keil <proj> -t <T> --step 5                     # 单步(步入) 5 次
 emb debug keil <proj> -t <T> --pstep 3                    # 单步(步过) 3 次
 # 组合：跑到 main 看寄存器
 emb debug keil <proj> -t <T> --run-to main --regs
 ```
 
-⚠️ `--run-to` / 裸运行后若断点没命中，程序一直跑，靠 `--timeout` 兜底（exit 124）。断点尽量用具体函数名/地址。
+⚠️ **`--run-to` 发的是 `G ,<sym>`（临时断点），不是 `BS <sym>` + `G`。** 实测后者在真实目标上永远不命中——程序一路跑到 `--timeout`（exit 124）；`G ,main` 立刻停在 main。原因没深究，但形式就用 `G ,`。`--break` 的 `BS` 本身是好的（和 `--run-to` 一起用时确实先在 `--break` 那个符号停住），只是**单独 `G` 不带停止地址时不看断点列表**。
+
+**想让程序"先跑一会儿"再取样**：Keil 的调试命令里**没有 HALT / DELAY**（停止执行只有断点或交互式 Ctrl-C），所以"跑 N 毫秒"表达不出来。可行做法是 `--run-to <一个稍后才执行到的符号>`（任务函数、周期性的中断处理函数等），命中后再读。`--no-reset` 只跳过 ini 里的 `RESET`，**不能**阻止 μVision 连接时自己复位目标。
 
 ## 自定义 .ini（高级）
 
@@ -65,8 +69,9 @@ emb debug keil <proj> -t <T> --ini my_debug.ini
 
 ## 选项
 
-- `--timeout 60`  UV4 -d 超时秒数（默认 60）。超时返回 exit 124。
-- `--no-reset`    跳过初始 RESET。
+- `--timeout 60`    UV4 -d 超时秒数（默认 60）。超时返回 exit 124。
+- `--no-reset`      跳过初始 RESET。
+- `--no-download`   不进下载：临时清掉该 target 的下载开关，读的就是板子上正在跑的那份固件。跑完还原。输出里 `Download` 一行会写 `skipped (--no-download)`。
 
 ## 调试器配置
 

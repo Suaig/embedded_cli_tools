@@ -39,9 +39,11 @@ Read(offset=341, limit=1) → Edit：把 `USE_KF</Define>` 替换成 `USE_KF,NEW
 
 加/删源文件、加/删分组这类「整节点增删」用 editor 命令（见 commands.md）。改单个值（宏、优化等级、scatter）不要用 editor，用上面的 locate+Edit。
 
-### editor 的格式代价（已大幅收敛）
+### editor 的格式代价
 
-editor 底层用 xmltree 全量解析再序列化，**任何一次 editor 写操作都会重写整个 `.uvprojx`**，DOM 会丢掉一些格式。`save_xml` 事后会从原文把这几项补回来：
+**`file-add` 已经不再重写整个文件**：它在目标 `<Files>` 块里按原缩进插入 5 行文本，其余字节原样保留。实测（2026-10-21，7720 行的 `TX.uvprojx`）`git diff` 恰好就是新增的那 5 行。文件形状不是它认得的（`<Files></Files>` 写在一行、`<Group>` 带属性等）时会回退到下面的 xmltree 路径——重排总好过写坏。
+
+其余 editor 写操作（`group-add` / `file-remove` / `file-exclude` / `defines-add` …）仍然底层用 xmltree 全量解析再序列化，**会重写整个 `.uvprojx`**。`save_xml` 事后会从原文把这几项补回来：
 
 | 行为 | 现在 |
 |---|---|
