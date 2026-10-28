@@ -714,7 +714,7 @@ pub fn file_add(
 
     // Keep the file's formatting when its shape is the one Keil writes; fall
     // back to the xmltree round-trip when it is not.
-    if !insert_file_text(path, group, file_name, &file_type.to_string(), filepath)? {
+    if !insert_file_text(path, target, group, file_name, &file_type.to_string(), filepath)? {
         save_xml(&root, path)?;
     }
     Ok(())
@@ -734,6 +734,7 @@ pub fn file_add(
 /// one is worse.
 fn insert_file_text(
     path: &Path,
+    target: &str,
     group: &str,
     file_name: &str,
     file_type: &str,
@@ -747,14 +748,28 @@ fn insert_file_text(
     // Locate the <Group> block whose <GroupName> is the target group. Groups do
     // not nest in a .uvprojx, but keep a depth counter anyway so a `<Group>`
     // inside some future element cannot be mistaken for the real one.
+    //
+    // The target name has to be tracked as well: a multi-target project carries
+    // the same group names in every target, so matching on the group alone
+    // always edits the first target's copy. That is how `file-add -t SlotB`
+    // used to write into SlotA.
     let mut depth: usize = 0;
     let mut block_start: Option<usize> = None;
     let mut block_is_ours = false;
     let mut block: Option<(usize, usize)> = None;
+    let mut current_target = String::new();
 
     for (i, line) in lines.iter().enumerate() {
         let t = line.trim();
-        if t.starts_with("<Group>") {
+        if t.starts_with("<TargetName>") {
+            current_target = t
+                .trim_start_matches("<TargetName>")
+                .split("</TargetName>")
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+        } else if t.starts_with("<Group>") {
             depth += 1;
             if depth == 1 {
                 block_start = Some(i);
@@ -779,7 +794,7 @@ fn insert_file_text(
                 .next()
                 .unwrap_or("")
                 .trim();
-            if name == group {
+            if name == group && current_target == target {
                 block_is_ours = true;
             }
         }
