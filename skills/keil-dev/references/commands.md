@@ -1,6 +1,6 @@
 # emb keil / ioc 命令速查
 
-`<proj>` = `.uvprojx` 路径；`<T>` = target 名（多 target 必填，单 target 可省）。输出格式**默认自动**：stdout 接终端用表格，被管道 / Agent 捕获用 AI 紧凑格式；`--ai` / `--json` / `--human` 可强制。Agent 通常不用加任何 flag。
+`<proj>` = `.uvprojx` 路径；`<T>` = target 名。`info` / `build` / `rebuild` / `clean` / `flash` / `debug` 的 `-t` 可省（省时静默用第一个 target）；`config` / `defines` / `includes` / `groups` / `files` 及写类命令的 `-t` 是 clap 必填。输出格式**默认自动**：stdout 接终端用表格，被管道 / Agent 捕获用 AI 紧凑格式；`--ai` / `--json` / `--human` 可强制。Agent 通常不用加任何 flag。
 
 `.uvmpw` 工作区：所有**接受工程路径**的 keil 子命令都接受 `-p <project>`（子项目文件名如 `Boot.uvprojx`，或 `.\Boot\Boot.uvprojx` 完整相对路径）；不带 `-p` 时取工作区里的**第一个**子项目。（`emb keil map` 例外——它接收的是 `.map` 文件，与工作区无关。）
 
