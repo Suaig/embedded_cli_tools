@@ -60,11 +60,11 @@ grep 是二次筛选，不是第一次读取。`poke` 没应答时输出 `(no re
 
 ## 关键陷阱（高频踩坑）
 
-- `emb keil locate` 返回 `start_line`，Read 时 **offset 直接填 start_line**（它是 1-based 起始行号，**不要减 1**）。
+- `emb keil locate` 输出里的 **`Read Offset` / `Read Limit`** 直接就是 Read 的 `offset` / `limit`，照抄即可，不要自己换算（`offset` 是 1-based）。
 - `emb debug keil` 每次会**下载 flash + halt CPU**（工程 `UpdateFlashBeforeDebugging=1` 时），耗时。只想读寄存器、不想冲掉正在跑的固件就加 **`--no-download`**（临时清下载开关，跑完还原）。
 - 没有探针时 UV4 只给一句 `Target DLL has been cancelled`。emb 会在失败后补充"工程配的是哪种探针、本机检测到几个"；`flash` 则在调用前比对并警告。
 - `--run-to` / 裸运行后断点没命中，程序一直跑，靠 `--timeout` 兜底（exit 124）。断点用具体函数名/地址。
-- 多 target 工程 `-t <T>` 必填，否则操作第一个 target。
+- 多 target 工程 `-t <T>` 必填，否则静默操作第一个 target；要一次编完所有 target 用 `--all-targets`（仅 `build` / `rebuild`）。
 - emb 找 UV4 顺序：`emb config keil_path` > 环境变量 > `C:\Keil_v5` > 扫描 Program Files。非标准安装位置配一次 config 即全局生效（build/flash/debug 都读它）。
 - `emb serial daemon start` 的输出可以安全捕获：`ID=$(emb serial daemon start COMx --id x)`。端口是**位置参数**，不叫 `--port`。详见 serial.md。
 
