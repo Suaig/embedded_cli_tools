@@ -91,7 +91,8 @@ pub fn handle(
                     sections.push(OutputValue::Message(filtered));
                 }
             }
-            if res.timed_out || res.exit_code != 0 {
+            let failed = res.timed_out || res.exit_code != 0;
+            if failed {
                 // "Timed out" on its own reads like a tool problem. When the
                 // session was waiting for a symbol, say so: the usual cause is
                 // that the target never runs that code at all (a bootloader
@@ -120,6 +121,16 @@ pub fn handle(
                 }
             }
             output::display(&OutputValue::Sections(sections), format);
+
+            // Exit code is the only signal a script sees; a failed UV4 session
+            // must not look like success just because the dump was still shown.
+            if failed {
+                anyhow::bail!(
+                    "UV4 -d failed (exit code {}{})",
+                    res.exit_code,
+                    if res.timed_out { ", timed out" } else { "" }
+                );
+            }
         }
     }
     Ok(())

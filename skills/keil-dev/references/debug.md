@@ -46,7 +46,7 @@ emb debug keil <proj> -t <T> --pstep 3                    # 单步(步过) 3 次
 emb debug keil <proj> -t <T> --run-to main --regs
 ```
 
-⚠️ **`--run-to` 发的是 `G ,<sym>`（临时断点），不是 `BS <sym>` + `G`。** 实测后者在真实目标上永远不命中——程序一路跑到 `--timeout`（exit 124）；`G ,main` 立刻停在 main。原因没深究，但形式就用 `G ,`。`--break` 的 `BS` 本身是好的（和 `--run-to` 一起用时确实先在 `--break` 那个符号停住），只是**单独 `G` 不带停止地址时不看断点列表**。
+⚠️ **`--run-to` 发的是 `G ,<sym>`（临时断点），不是 `BS <sym>` + `G`。** 实测后者在真实目标上永远不命中——程序一路跑到 `--timeout`，最终以超时失败退出；`G ,main` 立刻停在 main。原因没深究，但形式就用 `G ,`。`--break` 的 `BS` 本身是好的（和 `--run-to` 一起用时确实先在 `--break` 那个符号停住），只是**单独 `G` 不带停止地址时不看断点列表**。
 
 **想让程序"先跑一会儿"再取样**：Keil 的调试命令里**没有 HALT / DELAY**（停止执行只有断点或交互式 Ctrl-C），所以"跑 N 毫秒"表达不出来。可行做法是 `--run-to <一个稍后才执行到的符号>`（任务函数、周期性的中断处理函数等），命中后再读。`--no-reset` 只跳过 ini 里的 `RESET`，**不能**阻止 μVision 连接时自己复位目标。
 
@@ -69,7 +69,7 @@ emb debug keil <proj> -t <T> --ini my_debug.ini
 
 ## 选项
 
-- `--timeout 60`    UV4 -d 超时秒数（默认 60）。超时返回 exit 124。
+- `--timeout 60`    UV4 -d 超时秒数（默认 60）。超时或 UV4 非零退出时，打印完 dump 后命令返回非零。
 - `--no-reset`      跳过初始 RESET。
 - `--no-download`   不进下载：临时清掉该 target 的下载开关，读的就是板子上正在跑的那份固件。跑完还原。输出里 `Download` 一行会写 `skipped (--no-download)`。
 

@@ -26,7 +26,7 @@ main.rs (clap CLI) → 模块路由 → handler → 领域逻辑 → output::dis
 
 ### 输出格式系统
 
-所有命令结果通过 `output` 模块统一渲染。`OutputValue` 有 4 种变体：`Message`、`KeyValue`、`Table`、`List`。三种格式（Human/AI/JSON）分别实现 `render()`。`OutputFormat` 在 `main.rs` 中由 `--ai`/`--json` flag 决定，默认 Human。
+所有命令结果通过 `output` 模块统一渲染。`OutputValue` 有 4 种变体：`Message`、`KeyValue`、`Table`、`List`。三种显式格式（Human/AI/JSON）分别实现 `render()`。`OutputFormat::Auto` 是默认值，`resolve()` 按 stdout 是否为终端选 Human 或 AI；`--ai`/`--json`/`--human` 可显式覆盖。
 
 AI 模式下 `keil config` 的输出有特殊约定：每个值后面带 `[可选值范围]`，形成闭环——`config` 输出的 key 可以直接用于 `config-set`。
 

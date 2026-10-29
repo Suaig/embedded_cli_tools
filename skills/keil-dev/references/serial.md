@@ -80,6 +80,7 @@ emb serial daemon stop  fan
 | 要原始字节 | `daemon read` / `recv --show-hex` |
 
 - **绝不同时起两个 `read`**：`read` 是取走语义，先到的拿走全部，另一个看到空——极易误判成"命令卡住"。
+- **`poke` 不会自动补行结束符**：对 letter shell 发命令必须自己带 `\r`（如 `"version\r"`）。漏了会残留在设备行缓冲里，下一条拼成 `versionversion`；补齐前先发 `03`（Ctrl-C）清行。
 - 发长命令 / 长文件时，hex 这样生成（字符模式写不下时用）：
 
   ```bash

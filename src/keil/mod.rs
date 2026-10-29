@@ -470,6 +470,7 @@ fn cmd_build(
     // Flash also needs the target name so the probe check can pick the right
     // `<Target>` block out of the .uvoptx.
     let is_flash = matches!(command, builder::BuildCommand::Flash);
+    let mut flash_target: Option<String> = None;
     if target.is_some() || is_flash {
         let proj = load_project(&project_path)?;
         let resolved = resolve_target(&proj, target)?;
@@ -478,6 +479,7 @@ fn cmd_build(
             // is not attached fails inside UV4 with an error naming neither
             // the probe it wanted nor the one that is there.
             probe::warn_if_probe_mismatch(&project_path, &resolved.name);
+            flash_target = Some(resolved.name.clone());
         }
     }
 
@@ -499,7 +501,18 @@ fn cmd_build(
     }
 
     output::display(&OutputValue::KeyValue(pairs), format);
-    ensure_build_succeeded(&result)
+
+    // A failed flash names neither the probe nor the fact that none is
+    // attached; `debug keil` already adds that note, so do the same here.
+    if !result.success {
+        if let Some(target_name) = &flash_target {
+            if let Some(hint) = probe::missing_probe_hint(&project_path, target_name) {
+                eprintln!("{hint}");
+            }
+        }
+    }
+
+    ensure_build_succeeded(&result, command)
 }
 
 // ---------------------------------------------------------------------------
@@ -817,18 +830,35 @@ fn cmd_map_lookup(text: &str, addresses: &str, format: OutputFormat) -> anyhow::
 /// UV4 reports "built but nothing succeeded" as `Success: no` on stdout rather
 /// than as a process failure, so a bare `Ok(())` here would make the CLI exit 0
 /// on a broken build.
-fn ensure_build_succeeded(result: &builder::BuildResult) -> anyhow::Result<()> {
+fn ensure_build_succeeded(
+    result: &builder::BuildResult,
+    command: builder::BuildCommand,
+) -> anyhow::Result<()> {
     if result.success {
         return Ok(());
     }
 
-    let mut msg = format!(
-        "build failed: {} error(s), {} warning(s)",
-        result.errors, result.warnings
-    );
-    if result.output_file.is_empty() {
-        msg.push_str("; UV4 produced no output file");
-    }
+    let mut msg = match command {
+        builder::BuildCommand::Build | builder::BuildCommand::Rebuild => {
+            let op = if matches!(command, builder::BuildCommand::Build) {
+                "build"
+            } else {
+                "rebuild"
+            };
+            let mut msg = format!(
+                "{op} failed: {} error(s), {} warning(s)",
+                result.errors, result.warnings
+            );
+            if result.output_file.is_empty() {
+                msg.push_str("; UV4 produced no output file");
+            }
+            msg
+        }
+        builder::BuildCommand::Flash => {
+            "flash failed: UV4 could not complete the download".to_string()
+        }
+        builder::BuildCommand::Clean => "clean failed".to_string(),
+    };
     let tail: Vec<&str> = result
         .log
         .lines()
@@ -864,17 +894,30 @@ mod tests {
 
     #[test]
     fn successful_build_is_ok() {
-        assert!(ensure_build_succeeded(&build_result(true, 0)).is_ok());
+        assert!(ensure_build_succeeded(&build_result(true, 0), builder::BuildCommand::Build).is_ok());
     }
 
     #[test]
     fn failed_build_is_an_error() {
-        let err = ensure_build_succeeded(&build_result(false, 3)).unwrap_err();
+        let err =
+            ensure_build_succeeded(&build_result(false, 3), builder::BuildCommand::Build)
+                .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("3 error(s)"),
             "error should report the error count: {msg}"
         );
+    }
+
+    #[test]
+    fn failed_flash_does_not_claim_a_build_failure() {
+        let err =
+            ensure_build_succeeded(&build_result(false, 0), builder::BuildCommand::Flash)
+                .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("flash failed"), "message: {msg}");
+        assert!(!msg.contains("build failed"), "message: {msg}");
+        assert!(!msg.contains("no output file"), "message: {msg}");
     }
 
     /// uVision stores the 0-based index into the C/C++ (AC6) "Warnings"
