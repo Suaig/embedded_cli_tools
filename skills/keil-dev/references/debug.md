@@ -6,14 +6,14 @@ emb debug keil 走 `UV4 -d + .ini 脚本`：每次调用生成一段 `.ini`（`R
 
 这是**批处理**——跑完拿到 dump 结果。**不是**「敲一条 step、执行一步、停下等下一条」的交互式调试。UV4 没有 stdin 交互接口，这是 Keil 的固有限制。
 
-要**实时交互单步**（像 IDE 那样），用 openocd-debug skill（openocd + gdb，GDB MI 是成熟交互协议）。
+要**实时交互单步**（像 IDE 那样），用 openocd + gdb（GDB MI 是成熟交互协议）；若本机装了 `openocd-debug` skill 就直接用它。
 
 ## 何时用 debug keil vs openocd
 
 | 场景 | 用 |
 |---|---|
 | 读某时刻寄存器/内存、dump 状态、自动化验证 | **debug keil**（不用装额外工具） |
-| 实时单步、实时看变量、交互查问题 | openocd-debug |
+| 实时单步、实时看变量、交互查问题 | openocd + gdb（或已装的 openocd-debug skill） |
 
 两者调试同一个 `.axf`，互补。
 

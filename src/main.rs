@@ -20,6 +20,10 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
+    /// Output human-friendly tables even when stdout is captured
+    #[arg(long, global = true)]
+    human: bool,
+
     /// Internal: run as serial daemon process (hidden)
     #[arg(long, hide = true)]
     internal_daemon: Option<String>,
@@ -344,6 +348,9 @@ enum KeilCommands {
         /// Project name in workspace (for .uvmpw files)
         #[arg(short, long)]
         project: Option<String>,
+        /// Build every target in the project
+        #[arg(long)]
+        all_targets: bool,
         #[command(flatten)]
         build: BuildArgs,
     },
@@ -357,6 +364,9 @@ enum KeilCommands {
         /// Project name in workspace (for .uvmpw files)
         #[arg(short, long)]
         project: Option<String>,
+        /// Build every target in the project
+        #[arg(long)]
+        all_targets: bool,
         #[command(flatten)]
         build: BuildArgs,
     },
@@ -497,11 +507,45 @@ enum SerialCommands {
     Send {
         /// Serial port name
         port: String,
-        /// Data to send
+        /// Data to send (backslash escapes like \r \n \t \xHH are decoded)
         data: String,
         /// Interpret data as hex string
-        #[arg(long)]
+        #[arg(long, conflicts_with = "raw")]
         hex: bool,
+        /// Send the data literally, without decoding backslash escapes
+        #[arg(long)]
+        raw: bool,
+        /// Baud rate
+        #[arg(short, long, default_value = "115200")]
+        baud: u32,
+        /// Data bits
+        #[arg(short = 'd', long, default_value = "8")]
+        data_bits: SerialDataBits,
+        /// Parity
+        #[arg(short, long, default_value = "none")]
+        parity: SerialParity,
+        /// Stop bits
+        #[arg(short = 's', long, default_value = "1")]
+        stop_bits: SerialStopBits,
+    },
+    /// Send bytes and read the reply in one call (no daemon needed)
+    Poke {
+        /// Serial port name
+        port: String,
+        /// Data to send (backslash escapes like \r \n \t \xHH are decoded)
+        data: String,
+        /// Milliseconds to wait for the reply before reading
+        #[arg(long, default_value_t = 50)]
+        wait: u64,
+        /// Interpret data as hex string
+        #[arg(long, conflicts_with = "raw")]
+        hex: bool,
+        /// Send the data literally, without decoding backslash escapes
+        #[arg(long)]
+        raw: bool,
+        /// Display the reply as hex instead of text
+        #[arg(long)]
+        show_hex: bool,
         /// Baud rate
         #[arg(short, long, default_value = "115200")]
         baud: u32,
@@ -522,9 +566,9 @@ enum SerialCommands {
         /// Timeout in milliseconds
         #[arg(short, long)]
         timeout: u64,
-        /// Display as hex
+        /// Display the reply as hex instead of text
         #[arg(long)]
-        hex: bool,
+        show_hex: bool,
         /// Baud rate
         #[arg(short, long, default_value = "115200")]
         baud: u32,
@@ -579,11 +623,14 @@ enum DaemonCommands {
     Send {
         /// Daemon instance ID
         id: String,
-        /// Data to send
+        /// Data to send (backslash escapes like \r \n \t \xHH are decoded)
         data: String,
         /// Interpret data as hex string
-        #[arg(long)]
+        #[arg(long, conflicts_with = "raw")]
         hex: bool,
+        /// Send the data literally, without decoding backslash escapes
+        #[arg(long)]
+        raw: bool,
     },
     /// Send bytes and read the reply in one call
     ///
@@ -605,7 +652,7 @@ enum DaemonCommands {
         interval: u64,
         /// Display the reply as hex instead of text
         #[arg(long)]
-        hex: bool,
+        show_hex: bool,
     },
     /// Read unread data from a daemon
     Read {
@@ -613,7 +660,7 @@ enum DaemonCommands {
         id: String,
         /// Display as hex
         #[arg(long)]
-        hex: bool,
+        show_hex: bool,
     },
     /// View send/receive history
     History {
@@ -812,6 +859,17 @@ enum ConfigCommands {
 // ---------------------------------------------------------------------------
 
 fn main() -> anyhow::Result<()> {
+    // clap builds a large Command tree; the default 1 MiB main-thread stack is
+    // not enough for it in debug builds once the CLI has this many subcommands.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(run)
+        .expect("failed to spawn main thread")
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Internal daemon mode: spawned as a background child process
@@ -843,16 +901,18 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
-    if cli.ai && cli.json {
-        anyhow::bail!("--ai and --json are mutually exclusive");
+    if [cli.ai, cli.json, cli.human].iter().filter(|flag| **flag).count() > 1 {
+        anyhow::bail!("--ai, --json and --human are mutually exclusive");
     }
 
     let format = if cli.ai {
         OutputFormat::Ai
     } else if cli.json {
         OutputFormat::Json
-    } else {
+    } else if cli.human {
         OutputFormat::Human
+    } else {
+        OutputFormat::Auto
     };
 
     match &cli.command {

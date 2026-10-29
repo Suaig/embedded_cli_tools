@@ -1,6 +1,6 @@
 # emb keil / ioc 命令速查
 
-`<proj>` = `.uvprojx` 路径；`<T>` = target 名（多 target 必填，单 target 可省）。全局选项 `--ai`（紧凑）/ `--json`。
+`<proj>` = `.uvprojx` 路径；`<T>` = target 名（多 target 必填，单 target 可省）。输出格式**默认自动**：stdout 接终端用表格，被管道 / Agent 捕获用 AI 紧凑格式；`--ai` / `--json` / `--human` 可强制。Agent 通常不用加任何 flag。
 
 `.uvmpw` 工作区：所有**接受工程路径**的 keil 子命令都接受 `-p <project>`（子项目文件名如 `Boot.uvprojx`，或 `.\Boot\Boot.uvprojx` 完整相对路径）；不带 `-p` 时取工作区里的**第一个**子项目。（`emb keil map` 例外——它接收的是 `.map` 文件，与工作区无关。）
 
@@ -17,6 +17,8 @@
 
 上表均可加 `[-p <project>]`。
 
+`files` 的 `Status` 列：`excluded` 表示该文件在 Keil 里取消勾选了「参与编译」（`IncludeInBuild=0`），不是文件缺失。判断一个文件是否真在编，看三处：构建目录有没有 `.o`、build log 是否提到、`.map` 是否命中。
+
 `config` 的 `category` 只接受顶层分类（`device`/`output`/`ccompiler`/`asm`/`linker`/`memory`），**不接受具体键**（`ccompiler.optim` 会报错并列出可选分类）。`config <category>` 与 `files -g <group>` 在无匹配时返回非零退出码，不会静默给空结果。
 
 `config memory.irom` / `iram` / `xram` 读的是 Keil 的老式标签，其中 `xram` 在多数工程里是空的历史字段——**别拿它判断"没有第二块 RAM"**。真正生效的内存区在 `<OCR_RVCT1..10>` 里，用 `keil info -t <T>` 看（列出所有 size 非零的区，含 ROM/RAM 类型）。
@@ -24,10 +26,12 @@
 ## 定位（省 token，见 editing.md）
 
 ```
-emb keil locate <proj> -t <T> defines       # 宏节点（start_line + raw）
+emb keil locate <proj> -t <T> defines       # 宏节点（start/end line + Read Offset/Limit + raw）
 emb keil locate <proj> -t <T> ScatterFile   # 任意配置标签
 emb keil locate <proj> -t <T> File          # 多行元素（start_line + end_line）
 ```
+
+`locate` 的输出里 `Read Offset` / `Read Limit` 就是 Read 工具要填的两个参数，直接照抄，不要自己换算。
 
 可加 `[-p <project>]`。`locate` 是**只读**的，返回行号供 Read + Edit 使用，不会重写 XML。
 
@@ -51,12 +55,14 @@ emb keil config-set      <proj> -t <T> key value
 ## 构建 / 烧录
 
 ```
-emb keil build   <proj> [-t <T>] [-p <project>] [--timeout S] [--stream]   # 增量
-emb keil rebuild <proj> [-t <T>] [-p <project>] [--timeout S] [--stream]   # 全量重编译
+emb keil build   <proj> [-t <T>] [-p <project>] [--timeout S] [--stream] [--all-targets]   # 增量
+emb keil rebuild <proj> [-t <T>] [-p <project>] [--timeout S] [--stream] [--all-targets]   # 全量重编译
 emb keil clean   <proj> [-t <T>] [-p <project>] [--timeout S]
 emb keil flash   <proj> [-t <T>] [-p <project>] [--timeout S] [--stream]   # Flash Download
 ```
-返回 success / errors / warnings / program_size(Code/RO/RW/ZI) / output_file。UV4 码：0=成功，1=警告，2+=错误。
+
+**多 target 工程（如双槽 SlotA/SlotB）一次编完用 `--all-targets`**：遍历工程里所有 target，最后给一张汇总表（Target / Success / Errors / Warnings / Build Time / Output），任一失败返回非零。它与 `-t` 互斥，只支持 `build` / `rebuild`。只编一个 target 会让另一个的 hex 停留在上一轮。
+返回 success / errors / warnings / program_size(Code/RO/RW/ZI) / output_file。UV4 码：0=成功，1=警告，2+=错误。`flash` 内部就是 `UV4 -f`，与 Keil GUI 的 Flash Download 等价。
 
 **失败会返回非零退出码**，stderr 带错误/警告计数与 UV4 日志末尾几行。target 名写错会在调用 UV4 **之前**就被拒掉并列出可用 target，不会白跑一轮编译。
 

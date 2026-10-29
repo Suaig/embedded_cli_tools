@@ -22,8 +22,8 @@ emb keil locate <proj> -t <T> <element>
 ## 三步工作流
 
 1. **定位**：`emb keil locate <proj> -t <T> defines` → 拿到 `start_line` + raw
-2. **读那几行**：Read 工具，`offset = start_line`，`limit` 按需（单行元素 1，多行看 end_line-start_line+1）
-   > ⚠️ Read 的 `offset` 就是 **1-based 起始行号**，**直接用 start_line，不要减 1**。这是高频踩坑点。
+2. **读那几行**：Read 工具，直接抄 `locate` 输出里的 **`Read Offset`** / **`Read Limit`** 两个字段（它们就是 Read 的 `offset` / `limit`）。
+   > ⚠️ 不要自己换算：`offset` 是 1-based，等于 `start_line`，**不要减 1**。
 3. **内容替换**：Edit 工具，`old_string` 用读到的原始文本（保证唯一），`new_string` 是改后的。
 
 ### 例子：加一个预处理宏

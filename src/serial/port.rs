@@ -207,6 +207,47 @@ pub fn send(port_name: &str, data: &[u8], config: &SerialConfig) -> anyhow::Resu
     Ok(())
 }
 
+/// Write, wait, then read everything available in one port session.
+///
+/// This is the no-daemon form of `daemon poke`. Stale input is dropped before
+/// the write so the reply can only belong to this exchange.
+pub fn poke(
+    port_name: &str,
+    data: &[u8],
+    wait_ms: u64,
+    config: &SerialConfig,
+) -> anyhow::Result<Vec<u8>> {
+    let mut port = serialport::new(port_name, config.baud_rate)
+        .data_bits(config.data_bits)
+        .parity(config.parity)
+        .stop_bits(config.stop_bits)
+        .timeout(Duration::from_millis(100))
+        .open()
+        .map_err(|e| anyhow::anyhow!(describe_open_error(port_name, &e)))?;
+
+    // Drop anything already buffered so the reply is attributable to this write.
+    let _ = port.clear(serialport::ClearBuffer::Input);
+
+    port.write_all(data)?;
+    port.flush()?;
+
+    if wait_ms > 0 {
+        std::thread::sleep(Duration::from_millis(wait_ms));
+    }
+
+    let mut buf = vec![0u8; 4096];
+    let mut received = Vec::new();
+    loop {
+        match port.read(&mut buf) {
+            Ok(n) => received.extend_from_slice(&buf[..n]),
+            Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => break,
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    Ok(received)
+}
+
 /// Receive data from a serial port with timeout (open, recv, close).
 pub fn recv(port_name: &str, timeout_ms: u64, config: &SerialConfig) -> anyhow::Result<Vec<u8>> {
     let mut port = serialport::new(port_name, config.baud_rate)

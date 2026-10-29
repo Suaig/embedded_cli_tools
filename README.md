@@ -1,12 +1,14 @@
 # emb — Embedded Development CLI Tools
 
+[English](README.en.md) | 简体中文
+
 面向 STM32/ARM 嵌入式开发的命令行工具箱。解析、编辑、构建 Keil 项目，操作 STM32CubeMX IOC 文件，管理串口通信 — 全部通过 CLI 完成。
 
 ## 设计目标
 
 `emb` 为 AI 助手（Claude Code 等）和人类开发者提供 token 高效的嵌入式项目管理能力：
 
-- **token 高效** — `--ai` 模式输出紧凑格式，无需读取整个 XML/配置文件
+- **token 高效** — 输出被 Agent 捕获时默认用紧凑格式，无需读取整个 XML/配置文件
 - **完整 CRUD** — 不仅查看，还能增删改 Keil/IOC 项目的所有元素
 - **闭环工作流** — 编辑代码 → 编译 → 烧录 → 串口监控 → 调试，全在 CLI
 - **多项目支持** — 一条命令处理 Keil workspace（`.uvmpw`）中的多个子项目
@@ -29,9 +31,11 @@
   - ASCII 和 HEX 双模式
   - 长期监控的 daemon 模式（支持多个实例）
   - daemon 可设 `--ttl` / `--idle-timeout`，忘了关闭也会自己释放端口
-  - `daemon poke`：一次调用内完成「清缓冲 → 写 → 等 → 读」，给字节级握手用
+  - `serial poke`：不启 daemon，一次调用内完成「清缓冲 → 写 → 等 → 读」
+  - `daemon poke`：同样的问答流程，但走常驻 daemon 并留下收发历史
+  - `send` 默认解码 `\r` `\n` `\t` `\0` `\e` `\xHH`，`--raw` 关掉解码
   - 收发历史记录
-- **三种输出格式** — 人类友好表格 / AI 紧凑格式 / 结构化 JSON
+- **四种输出格式** — 自动（终端表格 / 非终端紧凑）/ AI 紧凑 / 人类表格 / 结构化 JSON
 
 ## 安装
 
@@ -131,16 +135,18 @@ emb ioc generate test.ioc                  # 调用 CubeMX 生成代码
 
 ```bash
 emb serial scan                            # 扫描可用串口
-emb serial send COM3 "AT\r\n"              # 发送数据
-emb serial recv COM3 --timeout 3000        # 接收数据
+emb serial send COM3 "AT\r\n"              # 字符模式：\r \n \t \0 \e \xHH 会解码
+emb serial send COM3 41540d --hex          # 按 hex 发
+emb serial poke COM3 "version\r" --wait 800 # 发→等→读一次完成，不需要 daemon
+emb serial recv COM3 --timeout 3000        # 读；超时无数据返回非零
 
-# Daemon 模式（长期监控）
+# Daemon 模式（长期监控 / 需要收发历史）
 emb serial daemon start COM3 --baud 115200 --id my-device
 emb serial daemon start COM3 --id my-device --ttl 600          # 10 分钟后自我释放端口
 emb serial daemon start COM3 --id my-device --idle-timeout 120 # 闲置 2 分钟自我释放
-emb serial daemon send my-device "hello"
-emb serial daemon poke my-device 7f --wait 50                  # 发 1 字节、等 50ms、读回
-emb serial daemon read my-device
+emb serial daemon send my-device "hello\r"                     # 同样解码转义
+emb serial daemon poke my-device 7f --wait 50                  # data 恒为 hex
+emb serial daemon read my-device --show-hex
 emb serial daemon list                                         # Status / Limits 两列
 emb serial daemon history my-device
 emb serial daemon stop my-device
@@ -148,15 +154,16 @@ emb serial daemon stop my-device
 
 ## 输出格式
 
-所有命令支持三种输出模式：
+所有命令支持四种输出模式。**默认是自动**：stdout 接终端（人看）用表格，被管道 / Agent / 脚本捕获用 AI 紧凑格式——Agent 不加 flag 就能拿到最省 token 的格式。
 
 | Flag | 用途 | 示例 |
 |------|------|------|
-| 默认 | 人类可读表格 | `emb keil files project.uvprojx -t "Target 1"` |
-| `--ai` | AI 紧凑格式，最省 token | `emb --ai keil config project.uvprojx -t "Target 1"` |
-| `--json` | 结构化 JSON | `emb --json keil info project.uvprojx` |
+| 默认（auto） | 终端 → 人类表格；非终端 → AI 紧凑格式 | `emb keil files project.uvprojx -t "Target 1"` |
+| `--ai` | 强制 AI 紧凑格式，最省 token | `emb --ai keil config project.uvprojx -t "Target 1"` |
+| `--json` | 强制结构化 JSON，给 jq / 脚本消费 | `emb --json keil info project.uvprojx` |
+| `--human` | 强制人类表格（输出被捕获时也想要表格） | `emb --human keil files project.uvprojx` |
 
-`--ai` 和 `--json` 互斥，不可同时使用。
+`--ai` / `--json` / `--human` 互斥，不可同时使用。JSON 是 pretty 输出，体积约为 AI 的 1.5~4 倍（`keil files` 实测 35.8 KB vs 20.1 KB），只在需要程序化解析时用。
 
 AI 模式输出示例：
 
@@ -167,6 +174,8 @@ output.hex:yes
 ccompiler.optim:4 (-O3) [0=<default> 1=-O0 2=-O1 3=-O2 4=-O3 5=-Ofast 6=-Os balanced 7=-Oz image size 8=-Omax]
 ccompiler.wlevel:3 (AC5-like Warnings) [0=<unspecified> 1=No Warnings 2=All Warnings 3=AC5-like Warnings 4=MISRA Compatible]
 ```
+
+表格用 `|` 分隔，单元格内的 `|` 会被转义成 `\|`；多段输出（`keil map`、`keil locate`、`keil info -t`、`debug keil`）之间用一行 `---` 分隔——不能用空行判断段界，因为 raw XML / UV4 日志本身可能含空行。
 
 `--json` 每次调用只输出**一个** JSON 文档，且带 `kind` 判别字段，消费方按一个字段分发即可，不必按命令猜形状：
 
@@ -213,15 +222,16 @@ emb keil file-add <path> -t <target> -g <group> <filepath> [-p <project>]
 emb keil file-remove <path> -t <target> -g <group> <filename> [-p <project>]
 emb keil file-exclude <path> -t <target> -g <group> <filename> [-p <project>]
 emb keil file-include <path> -t <target> -g <group> <filename> [-p <project>]
-emb keil build <path> [-t <target>] [-p <project>] [--timeout <sec>] [--stream]
-emb keil rebuild <path> [-t <target>] [-p <project>] [--timeout <sec>] [--stream]
+emb keil build <path> [-t <target>] [-p <project>] [--timeout <sec>] [--stream] [--all-targets]
+emb keil rebuild <path> [-t <target>] [-p <project>] [--timeout <sec>] [--stream] [--all-targets]
 emb keil clean <path> [-t <target>] [-p <project>] [--timeout <sec>]
 emb keil flash <path> [-t <target>] [-p <project>] [--timeout <sec>] [--stream]
 emb keil map <path> [--lookup <addr[,addr...]>]
                                              # 分析 armlink .map（ROM/RW/ZI + 执行区域）
                                              # --lookup 把地址翻成符号：符号 + 偏移 + 类型 + 对象
 emb keil locate <path> -t <target> <element> [-p <project>]
-                                             # 定位 XML 节点（返回 start_line + 原始片段）
+                                             # 定位 XML 节点（start_line / end_line /
+                                             # Read Offset / Read Limit + 原始片段）
                                              # element: defines | includes | Optim | ScatterFile | File | ...
 ```
 
@@ -239,15 +249,19 @@ emb ioc generate <path> [--cubemx <path>]
 
 ```
 emb serial scan
-emb serial send <port> <data> [--hex] [-b <baud>] [-d <bits>] [-p <parity>] [-s <stop>]
-emb serial recv <port> --timeout <ms> [--hex] [-b <baud>] [-d <bits>] [-p <parity>] [-s <stop>]
+emb serial send <port> <data> [--hex|--raw] [-b <baud>] [-d <bits>] [-p <parity>] [-s <stop>]
+                               # 默认解码 \r \n \t \0 \e \xHH；--raw 按字面发
+emb serial poke <port> <data> [--wait <ms>] [--hex|--raw] [--show-hex]
+                               [-b <baud>] [-d <bits>] [-p <parity>] [-s <stop>]
+                               # 一次调用内「清缓冲 → 写 → 等 → 读」
+emb serial recv <port> --timeout <ms> [--show-hex] [-b <baud>] [-d <bits>] [-p <parity>] [-s <stop>]
 emb serial daemon start <port> [-b <baud>] [--id <name>] [-d <bits>] [-p <parity>] [-s <stop>]
                                [--ttl <sec>] [--idle-timeout <sec>]
 emb serial daemon list
-emb serial daemon send <id> <data> [--hex]
-emb serial daemon poke <id> <hex> [--wait <ms>] [--repeat <n>] [--interval <ms>] [--hex]
-                               # 一次调用内「清缓冲 → 写 → 等 → 读」
-emb serial daemon read <id> [--hex]
+emb serial daemon send <id> <data> [--hex|--raw]
+emb serial daemon poke <id> <hex> [--wait <ms>] [--repeat <n>] [--interval <ms>] [--show-hex]
+                               # data 恒为 hex；一次调用内「清缓冲 → 写 → 等 → 读」
+emb serial daemon read <id> [--show-hex]
 emb serial daemon history <id> [--limit <n>] [--clear]
 emb serial daemon stop <id>
 ```
@@ -379,7 +393,7 @@ emb/
 
 **安装**：见 [`skills/keil-dev/references/install.md`](skills/keil-dev/references/install.md)，或用你的 skill 安装工具指向 `skills/keil-dev/`。
 
-> 交互式单步调试见 `openocd-debug` skill（openocd + gdb），与 `emb debug keil` 的批处理模式互补。
+> 交互式单步调试用 openocd + gdb（若本机装了 `openocd-debug` skill 则直接用它），与 `emb debug keil` 的批处理模式互补。
 
 ## 许可证
 

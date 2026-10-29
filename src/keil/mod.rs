@@ -399,19 +399,70 @@ fn display_config(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_build(
     path_str: &str,
     target: &Option<String>,
+    every_target: bool,
     project: &Option<String>,
     command: builder::BuildCommand,
     opts: builder::BuildOptions,
     cfg: &crate::config::EmbConfig,
     format: OutputFormat,
 ) -> anyhow::Result<()> {
+    if every_target && target.is_some() {
+        anyhow::bail!("--all-targets and -t are mutually exclusive");
+    }
+    if every_target
+        && !matches!(
+            command,
+            builder::BuildCommand::Build | builder::BuildCommand::Rebuild
+        )
+    {
+        anyhow::bail!("--all-targets is only supported for build and rebuild");
+    }
+
     // For workspace files this resolves the sub-project selected by `-p`.
     let project_path = resolve_path(path_str, project)?;
 
     let uv4_path = crate::config::resolve_uv4(cfg).ok();
+
+    if every_target {
+        let proj = load_project(&project_path)?;
+        let headers = vec![
+            "Target".into(),
+            "Success".into(),
+            "Errors".into(),
+            "Warnings".into(),
+            "Build Time".into(),
+            "Output".into(),
+        ];
+        let mut rows = Vec::new();
+        let mut failed = false;
+        for t in &proj.targets {
+            let result = builder::build(
+                &project_path,
+                &Some(t.name.clone()),
+                command,
+                uv4_path.clone(),
+                &opts,
+            )?;
+            failed |= !result.success;
+            rows.push(vec![
+                t.name.clone(),
+                if result.success { "yes" } else { "no" }.into(),
+                result.errors.to_string(),
+                result.warnings.to_string(),
+                result.build_time.clone(),
+                result.output_file.clone(),
+            ]);
+        }
+        output::display(&OutputValue::Table { headers, rows }, format);
+        if failed {
+            anyhow::bail!("one or more targets failed");
+        }
+        return Ok(());
+    }
 
     // Reject an unknown target here rather than handing it to UV4, which
     // reports it as a silent "Success: no" with no diagnostics.
@@ -612,18 +663,18 @@ pub fn handle(_cli: &Cli, keil: &super::KeilCommands, cfg: &crate::config::EmbCo
             output::display(&OutputValue::Message("ok".into()), format);
             Ok(())
         }
-        super::KeilCommands::Build { path, target, project, build } => {
-            cmd_build(path, target, project, builder::BuildCommand::Build, build.options(), cfg, format)
+        super::KeilCommands::Build { path, target, all_targets, project, build } => {
+            cmd_build(path, target, *all_targets, project, builder::BuildCommand::Build, build.options(), cfg, format)
         }
-        super::KeilCommands::Rebuild { path, target, project, build } => {
-            cmd_build(path, target, project, builder::BuildCommand::Rebuild, build.options(), cfg, format)
+        super::KeilCommands::Rebuild { path, target, all_targets, project, build } => {
+            cmd_build(path, target, *all_targets, project, builder::BuildCommand::Rebuild, build.options(), cfg, format)
         }
         super::KeilCommands::Clean { path, target, project, timeout } => {
             let opts = builder::BuildOptions { timeout_secs: *timeout, stream: false };
-            cmd_build(path, target, project, builder::BuildCommand::Clean, opts, cfg, format)
+            cmd_build(path, target, false, project, builder::BuildCommand::Clean, opts, cfg, format)
         }
         super::KeilCommands::Flash { path, target, project, build } => {
-            cmd_build(path, target, project, builder::BuildCommand::Flash, build.options(), cfg, format)
+            cmd_build(path, target, false, project, builder::BuildCommand::Flash, build.options(), cfg, format)
         }
         super::KeilCommands::Map { path, lookup } => {
             match lookup {
@@ -649,6 +700,11 @@ pub fn handle(_cli: &Cli, keil: &super::KeilCommands, cfg: &crate::config::EmbCo
                 ("Element".into(), element.clone()),
                 ("Start Line".into(), snip.start_line.to_string()),
                 ("End Line".into(), snip.end_line.to_string()),
+                ("Read Offset".into(), snip.start_line.to_string()),
+                (
+                    "Read Limit".into(),
+                    (snip.end_line.saturating_sub(snip.start_line) + 1).to_string(),
+                ),
             ];
             output::display(
                 &OutputValue::Sections(vec![

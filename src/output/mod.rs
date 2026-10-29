@@ -3,14 +3,36 @@ pub mod ai;
 pub mod json;
 
 use serde::Serialize;
+use std::io::IsTerminal;
 
 /// Output format selection.
+///
+/// `Auto` is the default: a terminal gets the human table, anything capturing
+/// stdout (pipes, agents, scripts) gets the compact AI format. Agents therefore
+/// get the cheap format without passing any flag.
 #[derive(Debug, Clone, Copy, Default)]
 pub enum OutputFormat {
     #[default]
+    Auto,
     Human,
     Ai,
     Json,
+}
+
+impl OutputFormat {
+    /// Resolve `Auto` into a concrete format. Never returns `Auto`.
+    pub fn resolve(self) -> Self {
+        match self {
+            Self::Auto => {
+                if std::io::stdout().is_terminal() {
+                    Self::Human
+                } else {
+                    Self::Ai
+                }
+            }
+            other => other,
+        }
+    }
 }
 
 /// A structured output item that can be rendered in any format.
@@ -74,10 +96,11 @@ impl Serialize for OutputValue {
 
 /// Render output in the selected format.
 pub fn render(value: &OutputValue, format: OutputFormat) -> String {
-    match format {
+    match format.resolve() {
         OutputFormat::Human => human::render(value),
-        OutputFormat::Ai => ai::render(value),
         OutputFormat::Json => json::render(value),
+        // `resolve` never returns `Auto`; it maps to AI when stdout is captured.
+        _ => ai::render(value),
     }
 }
 

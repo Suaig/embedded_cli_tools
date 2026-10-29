@@ -85,6 +85,7 @@ pub fn handle(serial: &super::SerialCommands, format: OutputFormat) -> anyhow::R
             port,
             data,
             hex,
+            raw,
             baud,
             data_bits,
             parity,
@@ -92,17 +93,45 @@ pub fn handle(serial: &super::SerialCommands, format: OutputFormat) -> anyhow::R
         } => {
             let bytes = if *hex {
                 protocol::decode_hex(data)?
-            } else {
+            } else if *raw {
                 data.as_bytes().to_vec()
+            } else {
+                protocol::unescape(data)?
             };
             let config = build_config(*baud, data_bits, parity, stop_bits);
             port::send(port, &bytes, &config)?;
             output::display(&OutputValue::Message("ok".into()), format);
         }
+        super::SerialCommands::Poke {
+            port,
+            data,
+            wait,
+            hex,
+            raw,
+            show_hex,
+            baud,
+            data_bits,
+            parity,
+            stop_bits,
+        } => {
+            let bytes = if *hex {
+                protocol::decode_hex(data)?
+            } else if *raw {
+                data.as_bytes().to_vec()
+            } else {
+                protocol::unescape(data)?
+            };
+            let config = build_config(*baud, data_bits, parity, stop_bits);
+            let reply = port::poke(port, &bytes, *wait, &config)?;
+            output::display(
+                &OutputValue::Message(render_reply(&reply, *show_hex)),
+                format,
+            );
+        }
         super::SerialCommands::Recv {
             port,
             timeout,
-            hex,
+            show_hex,
             baud,
             data_bits,
             parity,
@@ -110,7 +139,10 @@ pub fn handle(serial: &super::SerialCommands, format: OutputFormat) -> anyhow::R
         } => {
             let config = build_config(*baud, data_bits, parity, stop_bits);
             let received = port::recv(port, *timeout, &config)?;
-            let text = if *hex {
+            if received.is_empty() {
+                anyhow::bail!("no data received on {port} within {timeout} ms");
+            }
+            let text = if *show_hex {
                 protocol::encode_hex(&received)
             } else {
                 String::from_utf8_lossy(&received).into_owned()
@@ -172,11 +204,13 @@ fn handle_daemon(daemon: &super::DaemonCommands, format: OutputFormat) -> anyhow
                 output::display(&OutputValue::Table { headers, rows }, format);
             }
         }
-        super::DaemonCommands::Send { id, data, hex } => {
+        super::DaemonCommands::Send { id, data, hex, raw } => {
             let bytes = if *hex {
                 protocol::decode_hex(data)?
-            } else {
+            } else if *raw {
                 data.as_bytes().to_vec()
+            } else {
+                protocol::unescape(data)?
             };
             daemon::send(id, &bytes)?;
             output::display(&OutputValue::Message("ok".into()), format);
@@ -187,7 +221,7 @@ fn handle_daemon(daemon: &super::DaemonCommands, format: OutputFormat) -> anyhow
             wait,
             repeat,
             interval,
-            hex,
+            show_hex,
         } => {
             let bytes = protocol::decode_hex(data)?;
             let repeats = (*repeat).max(1);
@@ -198,7 +232,7 @@ fn handle_daemon(daemon: &super::DaemonCommands, format: OutputFormat) -> anyhow
                     std::thread::sleep(std::time::Duration::from_millis(*interval));
                 }
                 let reply = daemon::poke(id, &bytes, *wait)?;
-                replies.push(render_reply(&reply, *hex));
+                replies.push(render_reply(&reply, *show_hex));
             }
 
             // One cycle reads like `read`; several need to stay distinguishable.
@@ -210,13 +244,13 @@ fn handle_daemon(daemon: &super::DaemonCommands, format: OutputFormat) -> anyhow
         }
         super::DaemonCommands::Read {
             id,
-            hex,
+            show_hex,
         } => {
             let received = daemon::read(id)?;
             if received.is_empty() {
                 output::display(&OutputValue::Message("(no new data)".into()), format);
             } else {
-                let text = if *hex {
+                let text = if *show_hex {
                     protocol::encode_hex(&received)
                 } else {
                     String::from_utf8_lossy(&received).into_owned()

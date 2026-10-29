@@ -61,7 +61,7 @@ AI 模式下 `keil config` 的输出有特殊约定：每个值后面带 `[可�
 
 ## Skill
 
-`skill/embedded-dev.md` 是 Claude Code 的 Skill 文件，定义了何时触发该 Skill 以及如何使用 `emb` 完成常见工作流。修改 Skill 行为时编辑此文件。
+`skills/keil-dev/SKILL.md` 是 Claude Code 的 Skill 文件，定义了何时触发该 Skill 以及如何使用 `emb` 完成常见工作流。命令行细节在 `skills/keil-dev/references/`。修改 Skill 行为时编辑这些文件。
 
 ## 常用命令速查
 
